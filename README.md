@@ -54,7 +54,7 @@
 
 ## 线上地址
 
-- 系统：**https://videodata.sligenai.cn**（网页登录用户名 admin，密码见服务器 `.env` 的 `APP_PASSWORD`）
+- 系统：**https://videodata.sligenai.cn**（打开即为登录页，用户名 admin，密码见服务器 `.env` 的 `APP_PASSWORD`）
 - 接入文档：https://videodata.sligenai.cn/developer （公开）
 - 在线调试：https://videodata.sligenai.cn/api/v1/docs
 
@@ -105,7 +105,9 @@ cp .env_sample .env && chmod 600 .env           # 填入 DEEPSEEK_API_KEY、APP_
 ./start.sh                                       # 后台对外运行在 8770 端口（需配置 APP_PASSWORD），./stop.sh 停止
 ```
 
-配置 `APP_PASSWORD` 后网页启用登录（HTTP Basic Auth）；未配置时只允许本机访问。
+配置 `APP_PASSWORD` 后网页启用登录：未登录访问任何页面都会进入登录页 `/login`（可勾选 30 天内自动登录，否则 12 小时），
+左侧菜单底部可退出登录；同一 IP 10 分钟内输错 10 次暂停登录 10 分钟；修改密码后旧的登录状态全部失效。
+脚本/curl 仍可用 HTTP Basic Auth（`curl -u admin:密码 ...`）。未配置密码时只允许本机访问。
 
 检索、下载都是**异步任务**：提交后立即返回，可以连续提交多张产品图，页面“任务队列”显示排队和进度，完成后自动展示结果。
 同时执行的检索数由 `SEARCH_WORKERS` 控制（默认 2），其余排队；任务记录保存在 `runs/_tasks/`，刷新页面不丢。

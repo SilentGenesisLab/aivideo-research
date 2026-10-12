@@ -13,6 +13,17 @@ window.swrJSON = async function (url, render) {
     render(JSON.parse(text), false);
   }
 };
+// 登录过期：页面里的接口请求返回 401 时回到登录页
+(function () {
+  const raw = window.fetch;
+  window.fetch = async function (...args) {
+    const r = await raw.apply(this, args);
+    const url = String(args[0] && args[0].url || args[0] || "");
+    if (r.status === 401 && !/\/api\/v1\//.test(url) && !/\/api\/login/.test(url))
+      location.href = "/login?expired=1&next=" + encodeURIComponent(location.pathname + location.search + location.hash);
+    return r;
+  };
+})();
 // 外站封面、产品图统一走服务器缩略图缓存
 window.thumbUrl = (u, w) => /^https?:\/\//i.test(u || "") ? `/img?w=${w || 480}&u=${encodeURIComponent(u)}` : (u || "");
 
@@ -46,7 +57,8 @@ window.thumbUrl = (u, w) => /^https?:\/\//i.test(u || "") ? `/img?w=${w || 480}&
   const side = document.createElement("aside");
   side.className = "side";
   side.innerHTML = `<a class="brand" href="/"><img src="${logo}" alt=""><span><b>参考片检索</b><small>产品图 → 参考广告片</small></span></a>
-    ${items}<div class="foot">AI 识图 · 16 个渠道 · 站内播放</div>`;
+    ${items}<div class="foot"><div class="me"><span class="av">A</span><span class="nm">admin</span>
+      <a href="/logout" class="out" title="退出登录">退出</a></div></div>`;
   const top = document.createElement("div");
   top.className = "sidebar-top";
   top.innerHTML = `<button aria-label="菜单">☰</button><img src="${logo}" alt=""><b>参考片检索</b>`;
@@ -83,4 +95,8 @@ window.thumbUrl = (u, w) => /^https?:\/\//i.test(u || "") ? `/img?w=${w || 480}&
     } catch (e) { setTimeout(badge, 30000); }
   }
   badge();
+  fetch("/api/me").then(r => r.json()).then(j => {
+    side.querySelector(".me .nm").textContent = j.user;
+    side.querySelector(".me .av").textContent = (j.user || "A").slice(0, 1).toUpperCase();
+  }).catch(() => {});
 })();

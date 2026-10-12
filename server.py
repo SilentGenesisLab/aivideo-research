@@ -1,18 +1,17 @@
 """网页界面：python server.py [--host 127.0.0.1] [--port 8765]
 
-在 .env 配置 APP_PASSWORD 后启用登录（HTTP Basic Auth，用户名 APP_USER，默认 admin）。
+在 .env 配置 APP_PASSWORD 后启用登录（登录页 /login，用户名 APP_USER，默认 admin；脚本可用 HTTP Basic Auth）。
 未配置密码时拒绝监听非本机地址。"""
 import argparse
-import base64
 import os
-import secrets
 import sys
 import uuid
+from urllib.parse import quote
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
@@ -20,33 +19,30 @@ from pydantic import BaseModel
 import api_v1
 import time
 
-from refsearch import config, downloader, images, pipeline, platforms, player, security, stats, tasks
+from refsearch import auth, config, downloader, images, pipeline, platforms, player, security, stats, tasks
 from refsearch.searchers import SOURCES
 
 app = FastAPI(title="参考视频检索", docs_url=None, redoc_url=None, openapi_url=None)  # 对外文档见 /api/v1/docs
-APP_USER = os.environ.get("APP_USER", "admin")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 
 
+PUBLIC_PATHS = ("/api/health", "/developer", "/login", "/api/login", "/logout",
+                "/favicon.ico", "/favicon.svg", "/apple-touch-icon.png")
+
+
 @app.middleware("http")
-async def basic_auth(request: Request, call_next):
-    # /api/v1 用 API Key 鉴权，/files 用签名校验，都不走网页登录
+async def login_required(request: Request, call_next):
+    """网页登录：签名 Cookie 会话（登录页），脚本/curl 仍可用 HTTP Basic Auth。
+    /api/v1 用 API Key 鉴权，/files 用签名校验，都不走网页登录。"""
     path = request.url.path
-    public = (path in ("/api/health", "/developer", "/favicon.ico", "/favicon.svg", "/apple-touch-icon.png")
-              or path.startswith(("/api/v1/", "/files/", "/developer/")))
-    if APP_PASSWORD and not public:
-        ok = False
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Basic "):
-            try:
-                user, _, pwd = base64.b64decode(auth[6:]).decode().partition(":")
-                ok = (secrets.compare_digest(user, APP_USER)
-                      & secrets.compare_digest(pwd, APP_PASSWORD))
-            except Exception:
-                ok = False
-        if not ok:
-            return Response("需要登录", status_code=401,
-                            headers={"WWW-Authenticate": 'Basic realm="ref-video-search", charset="UTF-8"'})
+    public = path in PUBLIC_PATHS or path.startswith(("/api/v1/", "/files/", "/developer/"))
+    if auth.enabled() and not public:
+        if not (auth.read_session(request.cookies.get(auth.COOKIE))
+                or auth.check_basic(request.headers.get("authorization", ""))):
+            if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+                target = path + (f"?{request.url.query}" if request.url.query else "")
+                return RedirectResponse(f"/login?next={quote(target)}", status_code=302)
+            return JSONResponse({"detail": "未登录或登录已过期"}, status_code=401)
     return await call_next(request)
 
 
@@ -142,6 +138,51 @@ def img(u: str = "", run: str = "", w: int = 480):
 
 _PLACEHOLDER = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 9"><rect width="16" height="9" fill="#1f2937"/>'
                 b'<path d="M6.5 2.8v3.4L9.5 4.5z" fill="#6b7280"/></svg>')
+
+
+class LoginReq(BaseModel):
+    username: str
+    password: str
+    remember: bool = True
+
+
+def _client_ip(request: Request) -> str:
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+
+
+@app.get("/login", include_in_schema=False)
+def login_page(request: Request):
+    if not auth.enabled() or auth.read_session(request.cookies.get(auth.COOKIE)):
+        return RedirectResponse("/", status_code=302)
+    return FileResponse(WEB / "login.html", headers=NO_CACHE)
+
+
+@app.post("/api/login", include_in_schema=False)
+def login(req: LoginReq, request: Request):
+    ip = _client_ip(request)
+    if wait := auth.blocked(ip):
+        raise HTTPException(429, f"尝试次数过多，请 {wait // 60 + 1} 分钟后再试")
+    if not auth.check(req.username.strip(), req.password):
+        auth.record_fail(ip)
+        raise HTTPException(401, "用户名或密码错误")
+    auth.clear_fails(ip)
+    token, ttl = auth.make_session(req.remember)
+    resp = JSONResponse({"ok": True, "user": auth.user()})
+    resp.set_cookie(auth.COOKIE, token, max_age=ttl if req.remember else None, httponly=True,
+                    secure=request.url.scheme == "https", samesite="lax", path="/")
+    return resp
+
+
+@app.get("/logout", include_in_schema=False)
+def logout():
+    resp = RedirectResponse("/login", status_code=302)
+    resp.delete_cookie(auth.COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/me", include_in_schema=False)
+def me(request: Request):
+    return {"user": auth.read_session(request.cookies.get(auth.COOKIE)) or auth.user()}
 
 
 @app.get("/favicon.ico", include_in_schema=False)
