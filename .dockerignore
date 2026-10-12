@@ -1,0 +1,12 @@
+.env
+.env.*
+*.env
+*cookies*.txt
+secrets/
+.venv/
+runs/
+__pycache__/
+*.pyc
+server.log
+server.pid
+.git/

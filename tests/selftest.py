@@ -92,7 +92,22 @@ def online(image):
             r = requests.post(f"{base}/api/search", files={"image": ("p.jpg", f, "image/jpeg")},
                               data={"brief": "30秒TVC，年轻白领，零糖无负担", "per_query": 8})
         jid = r.json()["job_id"]
-        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] == "running":
+        # 异步：第一个任务没跑完时，立刻再提交两个，都应秒回任务号并各自完成
+        t1 = time.time()
+        with open(image, "rb") as f:
+            r2 = requests.post(f"{base}/api/search", files={"image": ("p.jpg", f, "image/jpeg")},
+                               data={"brief": "并发测试", "platforms": "youku,digitaling", "per_query": 4})
+        with open(image, "rb") as f:
+            r3 = requests.post(f"{base}/api/search", files={"image": ("p.jpg", f, "image/jpeg")},
+                               data={"brief": "并发测试2", "platforms": "acfun", "per_query": 4})
+        check("异步：任务运行中可继续提交且秒回", r2.status_code == r3.status_code == 200 and time.time() - t1 < 5,
+              f"{time.time() - t1:.1f}s")
+        jids = [r2.json()["job_id"], r3.json()["job_id"]]
+        lst = requests.get(f"{base}/api/tasks").json()
+        check("异步：任务列表能看到全部任务", {jid, *jids} <= {x["id"] for x in lst})
+        check("异步：超出并发数的任务在排队", any(x["status"] == "queued" for x in lst if x["id"] in jids),
+              [(x["title"], x["status"], x["ahead"]) for x in lst[:3]])
+        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] in ("queued", "running"):
             time.sleep(2)
         check("检索任务完成", j["status"] == "done", j.get("error"))
         res = j["result"]
@@ -117,7 +132,7 @@ def online(image):
                 for p in sorted(pfs & {"YouTube", "Bilibili"})]
         r = requests.post(f"{base}/api/download", json={"run_id": res["run_id"], "urls": pick})
         jid = r.json()["job_id"]
-        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] == "running":
+        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] in ("queued", "running"):
             time.sleep(2)
         dls = j["result"]["downloads"]
         check("勾选下载全部成功", len(dls) == len(pick) and all(d["ok"] for d in dls),
@@ -139,12 +154,22 @@ def online(image):
               requests.get(base + next(h["image"] for h in hist if h["run_id"] == res["run_id"])).status_code == 200)
         r = requests.post(f"{base}/api/rerun", json={"run_id": res["run_id"], "platforms": ["youku", "digitaling"]})
         jid = r.json()["job_id"]
-        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] == "running":
+        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] in ("queued", "running"):
             time.sleep(2)
         rr = j.get("result") or {}
         check("重新检索成功并生成新记录", j["status"] == "done" and rr.get("run_id") != res["run_id"], j.get("error"))
         check("重新检索只用了所选渠道", rr.get("sources") == ["youku", "digitaling"], rr.get("sources"))
         check("重新检索沿用原简报", rr.get("brief") == res["brief"])
+
+        others = []
+        for x in jids:
+            while (o := requests.get(f"{base}/api/jobs/{x}").json())["status"] in ("queued", "running"):
+                time.sleep(2)
+            others.append(o)
+        check("异步：并发任务全部完成", all(o["status"] == "done" for o in others),
+              [o.get("error") for o in others])
+        ids = {res["run_id"], *(o["run_id"] for o in others)}
+        check("异步：每个任务结果目录独立", len(ids) == 3, ids)
 
         # 站内播放
         r = requests.get(f"{base}/api/play", params={"url": "https://www.bilibili.com/video/BV1Bu4y1q7Yy"}).json()
@@ -158,7 +183,7 @@ def online(image):
         relay_url = "https://www.youtube.com/watch?v=o_s2tvaVxt4"
         t0 = time.time()
         jid = requests.post(f"{base}/api/relay", json={"url": relay_url}).json()["job_id"]
-        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] == "running":
+        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] in ("queued", "running"):
             time.sleep(2)
         rr = j.get("result") or {}
         check("中转播放：拉取成功", rr.get("ok"), rr or j.get("error"))

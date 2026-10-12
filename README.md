@@ -24,10 +24,23 @@
     yt-dlp 下载 + 合并为 H.264/AAC 的 mp4（默认 ≤720p）
 ```
 
-## 安装
+## Docker 部署（推荐）
 
 ```bash
-cd ref-video-search
+git clone git@github.com:SilentGenesisLab/aivideo-research.git && cd aivideo-research
+cp .env_sample .env && chmod 600 .env           # 填入 DEEPSEEK_API_KEY、APP_PASSWORD
+docker compose up -d --build                     # http://<服务器IP>:8770，用户名 admin
+```
+
+- 更新：`git pull && docker compose up -d --build`
+- 日志：`docker compose logs -f`；停止：`docker compose down`
+- 数据都在宿主机 `./runs`（检索结果、下载、播放缓存、任务记录），重建容器不丢；容器设置了 `restart: unless-stopped`，服务器重启后自动拉起。
+- 端口、并发数在 `.env` 里改：`PORT`、`SEARCH_WORKERS`。
+
+## 本机安装（不用 Docker）
+
+```bash
+cd aivideo-research
 python3 -m venv --without-pip .venv            # 系统缺少 python3-venv 时的做法
 pip3 --python .venv/bin/python install -r requirements.txt
 cp .env_sample .env && chmod 600 .env           # 填入 DEEPSEEK_API_KEY、APP_PASSWORD
@@ -39,9 +52,13 @@ cp .env_sample .env && chmod 600 .env           # 填入 DEEPSEEK_API_KEY、APP_
 
 ```bash
 .venv/bin/python server.py                       # http://127.0.0.1:8765
+./start.sh                                       # 后台对外运行在 8770 端口（需配置 APP_PASSWORD），./stop.sh 停止
 ```
 
-服务没有登录鉴权。需要给团队用时，请放在内网或反向代理鉴权后面，再改 `--host`。
+配置 `APP_PASSWORD` 后网页启用登录（HTTP Basic Auth）；未配置时只允许本机访问。
+
+检索、下载都是**异步任务**：提交后立即返回，可以连续提交多张产品图，页面“任务队列”显示排队和进度，完成后自动展示结果。
+同时执行的检索数由 `SEARCH_WORKERS` 控制（默认 2），其余排队；任务记录保存在 `runs/_tasks/`，刷新页面不丢。
 
 **命令行**
 

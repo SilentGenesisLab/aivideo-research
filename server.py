@@ -7,8 +7,6 @@ import base64
 import os
 import secrets
 import sys
-import tempfile
-import threading
 import uuid
 from pathlib import Path
 
@@ -18,7 +16,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from refsearch import config, pipeline, platforms, player
+from refsearch import config, pipeline, platforms, player, tasks
 from refsearch.searchers import SOURCES
 
 app = FastAPI(title="参考视频检索")
@@ -28,7 +26,7 @@ APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 
 @app.middleware("http")
 async def basic_auth(request: Request, call_next):
-    if APP_PASSWORD:
+    if APP_PASSWORD and request.url.path != "/api/health":
         ok = False
         auth = request.headers.get("authorization", "")
         if auth.startswith("Basic "):
@@ -44,24 +42,8 @@ async def basic_auth(request: Request, call_next):
     return await call_next(request)
 
 
-JOBS: dict[str, dict] = {}
 WEB = Path(__file__).parent / "web"
-
-
-def _start(fn) -> str:
-    jid = uuid.uuid4().hex[:12]
-    job = JOBS[jid] = {"status": "running", "log": [], "result": None, "error": None}
-
-    def run():
-        try:
-            job["result"] = fn(lambda m: job["log"].append(m))
-            job["status"] = "done"
-        except Exception as e:
-            job["error"] = str(e)
-            job["status"] = "error"
-
-    threading.Thread(target=run, daemon=True).start()
-    return jid
+UPLOADS = config.RUNS_DIR / "_uploads"
 
 
 NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
@@ -75,6 +57,11 @@ def index():
 @app.get("/method")
 def method():
     return FileResponse(WEB / "method.html", headers=NO_CACHE)
+
+
+@app.get("/api/health")
+def health():
+    return {"ok": True}
 
 
 @app.get("/api/sources")
@@ -106,7 +93,10 @@ def rerun(req: RerunReq):
     def work(progress):
         return pipeline.run_search(str(image), brief, pfs, progress=progress)
 
-    return {"job_id": _start(work)}
+    title = (old.get("analysis", {}).get("product", {}).get("name") or brief or req.run_id)[:40]
+    return {"job_id": tasks.submit("search", f"重新检索：{title}", work,
+                                   {"from_run": req.run_id, "image": f"/runs/{req.run_id}/{image.name}",
+                                    "platforms": list(pfs)})}
 
 
 @app.post("/api/search")
@@ -122,7 +112,8 @@ async def search(image: UploadFile = File(...), brief: str = Form(""),
     data = await image.read()
     if len(data) > 15 * 1024 * 1024:
         raise HTTPException(400, "图片不能超过 15MB")
-    tmp = Path(tempfile.mkstemp(suffix=suffix)[1])
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    tmp = UPLOADS / f"{uuid.uuid4().hex}{suffix}"
     tmp.write_bytes(data)
     pfs = tuple(p for p in platforms.split(",") if p in pipeline.DEFAULT_SOURCES) or pipeline.DEFAULT_SOURCES
 
@@ -134,7 +125,8 @@ async def search(image: UploadFile = File(...), brief: str = Form(""),
         finally:
             tmp.unlink(missing_ok=True)
 
-    return {"job_id": _start(work)}
+    title = brief.strip().splitlines()[0][:40] if brief.strip() else (image.filename or "产品图")
+    return {"job_id": tasks.submit("search", title, work, {"platforms": list(pfs)})}
 
 
 class DownloadReq(BaseModel):
@@ -154,10 +146,11 @@ def download(req: DownloadReq):
         raise HTTPException(400, "没有选中有效视频")
 
     def work(progress):
-        pipeline.download_into(result, vids, req.max_height, progress)
-        return result
+        latest = pipeline.load(req.run_id)  # 排队期间可能已有别的下载写入，取最新的
+        pipeline.download_into(latest, pipeline.find_videos(latest, req.urls), req.max_height, progress)
+        return latest
 
-    return {"job_id": _start(work)}
+    return {"job_id": tasks.submit("download", f"下载 {len(vids)} 条视频", work, {"run_id": req.run_id})}
 
 
 @app.get("/api/play")
@@ -175,7 +168,7 @@ class RelayReq(BaseModel):
 def relay(req: RelayReq):
     if not req.url.startswith(("http://", "https://")):
         raise HTTPException(400, "地址无效")
-    return {"job_id": _start(lambda progress: player.relay(req.url, progress))}
+    return {"job_id": tasks.submit("relay", "中转播放", lambda progress: player.relay(req.url, progress))}
 
 
 @app.get("/api/direct_platforms")
@@ -193,11 +186,24 @@ def platform_items(name: str, q: str):
         return {"items": [], "error": f"抓取失败：{e}"[:200]}
 
 
+@app.get("/api/tasks")
+def task_list():
+    return tasks.recent()
+
+
 @app.get("/api/jobs/{jid}")
+@app.get("/api/tasks/{jid}")
 def job(jid: str):
-    if jid not in JOBS:
+    t = tasks.get(jid)
+    if not t:
         raise HTTPException(404, "任务不存在")
-    return JOBS[jid]
+    out = {**t, "ahead": tasks.position(t)}
+    if t["status"] == "done" and t["kind"] != "relay" and t["run_id"]:
+        try:
+            out["result"] = pipeline.load(t["run_id"])
+        except (FileNotFoundError, ValueError):
+            out["result"] = None
+    return out
 
 
 app.mount("/runs", StaticFiles(directory=config.RUNS_DIR), name="runs")

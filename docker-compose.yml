@@ -1,0 +1,23 @@
+# 部署：cp .env_sample .env（填好 DEEPSEEK_API_KEY、APP_PASSWORD）→ docker compose up -d --build
+name: aivideo-research
+services:
+  app:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+    image: aivideo-research:latest
+    container_name: aivideo-research
+    restart: unless-stopped          # 服务器重启后自动拉起
+    env_file: .env                   # 密钥只放 .env，不进镜像
+    environment:
+      RUNS_DIR: /app/runs
+    ports:
+      - "${PORT:-8770}:8770"
+    volumes:
+      - ./runs:/app/runs             # 检索结果、下载、播放缓存、任务记录
+      # 抖音下载需要 cookies 时取消注释，并在 .env 设 DOUYIN_COOKIES_FILE=/app/secrets/douyin_cookies.txt
+      # - ./secrets:/app/secrets:ro
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

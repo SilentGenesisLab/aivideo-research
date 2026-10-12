@@ -27,9 +27,16 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
                min_score: int = 5, download_mode: str = "none", download_top: int = 5,
                max_height: int = 720, progress=_noop) -> dict:
     t0 = time.time()
-    run_id = time.strftime("%Y%m%d-%H%M%S")
-    run_dir = config.RUNS_DIR / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    config.RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    base = time.strftime("%Y%m%d-%H%M%S")
+    for i in range(100):  # 多个任务同一秒开始时，目录名加序号避免互相覆盖
+        run_id = base if i == 0 else f"{base}-{i}"
+        run_dir = config.RUNS_DIR / run_id
+        try:
+            run_dir.mkdir()
+            break
+        except FileExistsError:
+            continue
     img_copy = run_dir / f"product{Path(image_path).suffix or '.jpg'}"
     shutil.copy(image_path, img_copy)
 

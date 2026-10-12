@@ -3,6 +3,7 @@
 .env.*
 *.env
 *cookies*.txt
+secrets/
 # 运行产物
 .venv/
 runs/

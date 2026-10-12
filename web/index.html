@@ -72,6 +72,14 @@
   .hrow button { padding:5px 10px; font-size:12px; }
   @media (max-width:600px) { .hrow { grid-template-columns:44px 1fr; } .hrow img { width:44px; height:44px; }
     .hrow .acts { grid-column:1/-1; justify-content:flex-start; } }
+  .tasks { display:flex; flex-direction:column; gap:6px; max-height:300px; overflow-y:auto; }
+  .task { display:grid; grid-template-columns:auto 1fr auto; gap:10px; align-items:center;
+          border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:13px; }
+  .task .st { font-size:12px; padding:1px 8px; border-radius:10px; white-space:nowrap; background:var(--accent-soft); color:var(--accent); }
+  .task .st.done { background:#e8f7ee; color:var(--ok); } .task .st.error { background:#fdecec; color:var(--bad); }
+  .task .st.queued { background:var(--bg); color:var(--muted); }
+  .task .m { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .task button { padding:4px 10px; font-size:12px; }
   .hidden { display:none !important; } .err { color:var(--bad); } .note { color:var(--muted); font-size:12px; }
   .thumb .play { position:absolute; inset:0; margin:auto; width:46px; height:46px; border-radius:50%;
                  background:rgba(0,0,0,.55); color:#fff; display:flex; align-items:center; justify-content:center;
@@ -132,6 +140,12 @@
         <div class="log" id="log"></div>
       </div>
     </div>
+  </div>
+
+  <div class="card" id="taskcard">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h3 style="margin:0">任务队列 <span class="note" id="taskstat"></span></h3></div>
+    <div class="tasks" id="tasks"><span class="note">暂无任务。提交后可以继续上传下一张图，任务在后台排队执行。</span></div>
   </div>
 
   <div class="card">
@@ -207,43 +221,78 @@ async function loadHistory() {
 }
 $("#histreload").onclick = loadHistory;
 
-async function viewRun(id) {
+async function viewRun(id, scroll = true) {
   const r = await fetch(`/runs/${encodeURIComponent(id)}/result.json`, {cache: "no-store"});
   if (!r.ok) return alert("读取失败");
   render(await r.json());
   loadHistory();
-  $("#out").scrollIntoView({behavior: "smooth"});
+  if (scroll) $("#out").scrollIntoView({behavior: "smooth"});
 }
 
-async function runJob(promise) {
-  $("#go").disabled = true; $("#out").innerHTML = ""; $("#bar").classList.add("hidden");
-  $("#log").textContent = "提交中…";
-  window.scrollTo({top: 0, behavior: "smooth"});
+// ---------- 异步任务 ----------
+// 提交只负责入队，不阻塞页面；任务队列每 2 秒刷新。follow 是“提交后还没去看别的结果”的那个任务，完成后自动展示。
+let follow = null, taskTimer = null, lastDone = new Set(), tasksInit = false;
+const ST = {queued: "排队中", running: "进行中", done: "已完成", error: "失败"};
+
+async function submitTask(promise, label) {
+  $("#go").disabled = true;
+  $("#log").textContent = `正在提交：${label}…`;
   try {
     const r = await promise;
     if (!r.ok) throw new Error((await r.json()).detail);
-    const j = await poll((await r.json()).job_id);
-    if (j.status === "error") throw new Error(j.error);
-    render(j.result);
-  } catch (e) { $("#log").innerHTML += `\n<span class="err">失败：${esc(e.message)}</span>`; }
+    follow = (await r.json()).job_id;
+    $("#log").textContent = `已加入任务队列：${label}。可以继续上传下一张图提交新任务。`;
+  } catch (e) { $("#log").innerHTML = `<span class="err">提交失败：${esc(e.message)}</span>`; }
   $("#go").disabled = !file;
-  loadHistory();
+  refreshTasks();
+}
+
+async function refreshTasks() {
+  clearTimeout(taskTimer);
+  let list = [];
+  try { list = await (await fetch("/api/tasks", {cache: "no-store"})).json(); } catch (e) {}
+  const active = list.filter(t => t.status === "queued" || t.status === "running");
+  $("#taskstat").textContent = active.length ? `· ${active.length} 个进行中/排队中` : "";
+  $("#tasks").innerHTML = list.length ? list.slice(0, 30).map(t => `
+    <div class="task"><span class="st ${t.status}">${ST[t.status] || t.status}${t.status === "queued" && t.ahead ? `（前面 ${t.ahead} 个）` : ""}</span>
+      <div style="min-width:0"><div>${t.kind === "download" ? "⬇ " : ""}${esc(t.title)} <span class="m">· ${esc(t.created.slice(5, 16))}</span></div>
+        <div class="m" title="${esc(t.error || t.last)}">${esc(t.status === "error" ? t.error : t.last || (t.status === "queued" ? "等待空闲…" : ""))}</div></div>
+      <div>${t.run_id && t.status === "done" ? `<button class="ghost" data-view="${esc(t.run_id)}">查看结果</button>` : ""}</div></div>`).join("")
+    : `<span class="note">暂无任务。提交后可以继续上传下一张图，任务在后台排队执行。</span>`;
+  $("#tasks").querySelectorAll("[data-view]").forEach(b => b.onclick = () => viewRun(b.dataset.view));
+
+  // 新完成的任务：刷新历史；正在跟踪的自动展示
+  const done = list.filter(t => t.status === "done" || t.status === "error");
+  const fresh = done.filter(t => !lastDone.has(t.id));
+  if (tasksInit) {
+    if (fresh.some(t => t.kind === "search")) loadHistory();
+    for (const t of fresh) {
+      if (t.id === follow) {
+        follow = null;
+        if (t.status === "error") $("#log").innerHTML = `<span class="err">任务失败：${esc(t.title)}：${esc(t.error)}</span>`;
+        else if (t.kind === "search" || (current && current.run_id === t.run_id)) {
+          $("#log").textContent = `已完成：${t.title}`;
+          await viewRun(t.run_id, t.kind === "search");
+        }
+      } else if (t.kind === "download" && t.status === "done" && current && current.run_id === t.run_id) {
+        await viewRun(t.run_id, false);
+      }
+    }
+  }
+  done.forEach(t => lastDone.add(t.id));
+  tasksInit = true;
+  if (follow) {
+    const ft = list.find(t => t.id === follow);
+    if (ft && ft.last) $("#log").textContent = `${ft.title}：${ft.status === "queued" ? "排队中" : ft.last}`;
+  }
+  taskTimer = setTimeout(refreshTasks, active.length ? 2000 : 15000);
 }
 
 function rerun(id) {
   const pfs = checkedSources();
   if (!pfs.length) return alert("请至少勾选一个检索渠道");
-  runJob(fetch("/api/rerun", {method: "POST", headers: {"Content-Type": "application/json"},
-                               body: JSON.stringify({run_id: id, platforms: pfs})}));
-}
-
-async function poll(jid) {
-  while (true) {
-    const j = await (await fetch(`/api/jobs/${jid}`)).json();
-    $("#log").textContent = j.log.join("\n");
-    if (j.status !== "running") return j;
-    await new Promise(r => setTimeout(r, 1200));
-  }
+  submitTask(fetch("/api/rerun", {method: "POST", headers: {"Content-Type": "application/json"},
+                                  body: JSON.stringify({run_id: id, platforms: pfs})}), "重新检索");
 }
 
 $("#go").onclick = () => {
@@ -254,7 +303,7 @@ $("#go").onclick = () => {
   fd.append("platforms", pfs.join(","));
   fd.append("per_query", $("#perq").value); fd.append("max_duration", $("#maxdur").value);
   fd.append("download_mode", $("#dlmode").value); fd.append("download_top", $("#dltop").value);
-  runJob(fetch("/api/search", {method: "POST", body: fd}));
+  submitTask(fetch("/api/search", {method: "POST", body: fd}), $("#brief").value.trim().slice(0, 20) || file.name);
 };
 
 const fmtDur = s => s ? `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}` : "-";
@@ -415,24 +464,18 @@ $("#selall").onclick = () => {
   const all = [...document.querySelectorAll(".sel")], on = all.some(c => !c.checked);
   all.forEach(c => c.checked = on); updSel();
 };
-$("#dlbtn").onclick = async () => {
+$("#dlbtn").onclick = () => {
   const urls = [...document.querySelectorAll(".sel:checked")].map(c => c.value);
-  $("#dlbtn").disabled = true;
-  try {
-    const r = await fetch("/api/download", {method: "POST", headers: {"Content-Type": "application/json"},
-                                            body: JSON.stringify({run_id: current.run_id, urls})});
-    if (!r.ok) throw new Error((await r.json()).detail);
-    window.scrollTo({top: 0, behavior: "smooth"});
-    const j = await poll((await r.json()).job_id);
-    if (j.status === "error") throw new Error(j.error);
-    render(j.result);
-  } catch (e) { $("#log").innerHTML += `\n<span class="err">下载失败：${esc(e.message)}</span>`; }
+  submitTask(fetch("/api/download", {method: "POST", headers: {"Content-Type": "application/json"},
+                                     body: JSON.stringify({run_id: current.run_id, urls})}), `下载 ${urls.length} 条视频`);
+  document.querySelectorAll(".sel:checked").forEach(c => c.checked = false);
   updSel();
 };
 let DIRECT = new Set();
 fetch("/api/direct_platforms").then(r => r.json()).then(a => DIRECT = new Set(a)).catch(() => {});
 loadSources();
 loadHistory();
+refreshTasks();
 </script>
 </body>
 </html>
