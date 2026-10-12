@@ -118,6 +118,7 @@ def online(image):
         r = requests.post(f"{base}/api/v1/searches", headers=h, json={
             "image_base64": "data:image/jpeg;base64," + b64, "brief": "30秒TVC，年轻白领，零糖",
             "sources": ["youku", "digitaling", "acfun", "bilibili"], "per_query": 5, "max_duration": 120,
+            "depth": "quick", "target_count": 12,
             "download": "top", "download_top": 1, "callback_url": hook_url, "external_id": "order-123",
             "filters": {"types": ["tvc", "brand"], "exclude": ["合集", "教程"]}})
         check("创建检索 202 秒回", r.status_code == 202 and time.time() - t0 < 5, r.text)
@@ -162,6 +163,10 @@ def online(image):
         check("类型定向维度排在最前", run["dimensions"][0]["key"] == "type"
               and any("TV commercial" in q or "TVC" in q for q in run["dimensions"][0]["queries_en"]), run["dimensions"][0])
         check("筛选条件随结果返回", run["filters"]["types"] == ["tvc", "brand"] and "filtered" in run["stats"], run["filters"])
+        check("检索深度和目标数量生效", run["options"]["depth"] == "quick" and run["options"]["per_query"] == 5
+              and run["stats"]["target"] == 12 and len(vids) <= 12
+              and all(len(d["queries_zh"]) <= 1 for d in run["dimensions"][1:]),
+              {"options": run["options"], "kept": len(vids), "q": [d["queries_zh"] for d in run["dimensions"]]})
         check("每条视频都有类型", all(v["video_type"] and v["video_type_name"] for v in vids))
         check("排除词生效", not any("合集" in v["title"] or "教程" in v["title"] for v in vids))
         check("结果有视频与参考点", vids and all(v["url"] and "reference" in v for v in vids), len(vids))

@@ -78,7 +78,12 @@ class SearchCreate(BaseModel):
     image_base64: str | None = Field(None, description="产品图 base64，可带 data:image/...;base64, 前缀")
     brief: str = Field("", max_length=2000, description="简报：目标、人群、时长、调性、想参考的竞品等，越具体越准")
     sources: list[str] | None = Field(None, description="检索渠道 key 列表，见 GET /sources；不传则全部")
-    per_query: int = Field(8, ge=1, le=20, description="每个关键词每个渠道取几条")
+    depth: Literal["quick", "standard", "deep"] = Field(
+        "standard", description="检索深度：quick 快速（每维度每语言 1 个关键词、每词 6 条，约 1 分钟）/ "
+                                "standard 标准（2 个、8 条，2~4 分钟）/ deep 深度（3 个、15 条，4~8 分钟）")
+    target_count: int | None = Field(None, ge=5, le=200, description="目标结果总数，会在各维度间分配；"
+                                     "达标视频不够时会少于目标。传了就忽略 top_per_dim")
+    per_query: int | None = Field(None, ge=1, le=20, description="每个关键词每个渠道取几条；不传则按 depth")
     max_duration: int = Field(300, ge=10, le=1800, description="视频最长秒数，只要 TVC 建议 90")
     top_per_dim: int = Field(10, ge=1, le=30, description="每个参考维度最多保留几条")
     min_score: int = Field(5, ge=0, le=10, description="AI 评分低于此值的丢弃")
@@ -94,6 +99,8 @@ class RerunCreate(BaseModel):
     sources: list[str] | None = Field(None, description="不传则全部渠道")
     brief: str | None = Field(None, description="不传则沿用原简报")
     filters: Filters | None = Field(None, description="不传则沿用原筛选条件")
+    depth: Literal["quick", "standard", "deep"] | None = Field(None, description="不传则沿用原检索深度")
+    target_count: int | None = Field(None, ge=0, le=200, description="不传则沿用原目标数量；0 表示不设目标")
     callback_url: str | None = None
     external_id: str | None = Field(None, max_length=128)
 
@@ -194,7 +201,8 @@ class Run(BaseModel):
     dimensions: list[Dimension]
     reference_platforms: list[ReferencePlatform]
     filters: dict = Field(description="本次使用的筛选条件")
-    stats: dict = Field(description="queries/raw/kept/seconds；filtered 为各原因筛掉的条数")
+    options: dict = Field(description="本次使用的检索参数：depth/target_count/per_query/top_per_dim/min_score/max_duration")
+    stats: dict = Field(description="queries/raw/kept/seconds；target 目标数量、eligible 达标总数、filtered 各原因筛掉的条数")
     errors: list[str]
 
 
@@ -279,7 +287,7 @@ def run_out(r: dict, base: str) -> dict:
                                  "search_url": p["url"], "direct": "fetch" in next(
                                      (x for x in platforms.PLATFORMS if x["name"] == p["name"]), {})}
                                 for p in r.get("platform_links", [])],
-        "filters": flt.normalize(r.get("filters")),
+        "filters": flt.normalize(r.get("filters")), "options": r.get("options") or {},
         "stats": r.get("stats", {}), "errors": r.get("errors", []),
     }
 
@@ -376,7 +384,7 @@ def _save_upload(data: bytes, ext: str) -> Path:
 
 
 def _opts(p: SearchCreate) -> dict:
-    return {"per_query": p.per_query, "max_duration": p.max_duration, "top_per_dim": p.top_per_dim,
+    return {"per_query": p.per_query, "depth": p.depth, "target_count": p.target_count, "max_duration": p.max_duration, "top_per_dim": p.top_per_dim,
             "min_score": p.min_score, "download_mode": p.download, "download_top": p.download_top,
             "max_height": p.max_height, "filters": p.filters.model_dump()}
 
@@ -430,7 +438,8 @@ def create_search(p: SearchCreate, request: Request, who: str = Depends(client))
              summary="创建检索任务（multipart 上传图片）")
 async def create_search_upload(request: Request, image: UploadFile = File(..., description="产品图 jpg/png/webp"),
                                brief: str = Form(""), sources: str = Form("", description="逗号分隔，不传则全部"),
-                               per_query: int = Form(8), max_duration: int = Form(300),
+                               per_query: int | None = Form(None), max_duration: int = Form(300),
+                               depth: str = Form("standard"), target_count: int | None = Form(None),
                                top_per_dim: int = Form(10), min_score: int = Form(5),
                                download: str = Form("none"), download_top: int = Form(5),
                                max_height: int = Form(720), callback_url: str = Form(""),
@@ -441,7 +450,8 @@ async def create_search_upload(request: Request, image: UploadFile = File(..., d
         raise ApiError(400, "invalid_image", "仅支持 jpg / png / webp")
     try:
         p = SearchCreate(image_base64="-", brief=brief, sources=[s for s in sources.split(",") if s] or None,
-                         per_query=per_query, max_duration=max_duration, top_per_dim=top_per_dim,
+                         per_query=per_query, max_duration=max_duration, depth=depth,
+                         target_count=target_count, top_per_dim=top_per_dim,
                          min_score=min_score, download=download, download_top=download_top,
                          max_height=max_height, callback_url=callback_url or None,
                          external_id=external_id or None,
@@ -534,7 +544,11 @@ def rerun(run_id: str, p: RerunCreate, request: Request, who: str = Depends(clie
         p.external_id = old.get("external_id")
     title = "重新检索：" + (old["analysis"].get("product", {}).get("name") or run_id)[:30]
     f = p.filters.model_dump() if p.filters else old.get("filters")
-    return _launch(image, p, brief, _sources(p.sources), who, _base(request), title, False, {"filters": f})
+    o = old.get("options") or {}
+    target = o.get("target_count") if p.target_count is None else (p.target_count or None)
+    opts = {"filters": f, "depth": p.depth or o.get("depth") or "standard", "target_count": target,
+            "min_score": o.get("min_score", 5), "max_duration": o.get("max_duration", 300)}
+    return _launch(image, p, brief, _sources(p.sources), who, _base(request), title, False, opts)
 
 
 @router.post("/runs/{run_id}/downloads", response_model=TaskCreated, status_code=202, tags=["下载"],

@@ -189,9 +189,11 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | `image_base64` | string | — | 产品图 base64，可带 `data:image/jpeg;base64,` 前缀 |
 | `brief` | string | `""` | 简报：目标、人群、时长、调性、想参考的竞品。**越具体结果越准** |
 | `sources` | string[] | 全部 | 检索渠道 key |
-| `per_query` | int 1~20 | 8 | 每个关键词每个渠道取几条，调大更全但更慢 |
+| `depth` | `quick`/`standard`/`deep` | `standard` | 检索深度，见下表 |
+| `target_count` | int 5~200 | — | 目标结果总数，会在各维度间分配；传了就忽略 `top_per_dim`。达标视频不够时会少于目标 |
+| `per_query` | int 1~20 | 按 `depth` | 每个关键词每个渠道取几条；一般不用传，由 `depth` 决定 |
 | `max_duration` | int 10~1800 | 300 | 视频最长秒数；只要 TVC 建议 90 |
-| `top_per_dim` | int 1~30 | 10 | 每个维度最多保留几条 |
+| `top_per_dim` | int 1~30 | 10 | 每个维度最多保留几条（没传 `target_count` 时生效） |
 | `min_score` | int 0~10 | 5 | 低于此评分的丢弃 |
 | `filters` | object | 不筛选 | 类型定向与结果筛选，见下表 |
 | `download` | `none`/`top`/`all` | `none` | 检索完是否顺带下载 |
@@ -199,6 +201,16 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | `max_height` | 360/480/720/1080 | 720 | 下载清晰度上限 |
 | `callback_url` | string | — | 任务结束时的 Webhook 地址 |
 | `external_id` | string ≤128 | — | 你的业务 ID，会原样出现在任务、结果和回调里 |
+
+检索深度（`depth`）：
+
+| 值 | 每维度每种语言关键词 | 每词每渠道取 | 每维度最多送 AI 打分 | 全部渠道大约耗时 |
+|---|---|---|---|---|
+| `quick` 快速 | 1 个 | 6 条 | 40 条 | 1~2 分钟 |
+| `standard` 标准 | 2 个 | 8 条 | 90 条 | 2~4 分钟 |
+| `deep` 深度 | 3 个 | 15 条 | 160 条 | 4~8 分钟 |
+
+`target_count` 较大时，送 AI 打分的候选会自动加到名额的 3 倍左右（每维度上限 250 条）。结果的 `stats.target` 是目标数，`stats.kept` 是实际数，`stats.eligible` 是评分达标的总数。实际数明显少于目标时，可以提高深度、多选渠道或降低 `min_score`。
 
 `filters` 字段（都可选）：
 
@@ -386,10 +398,10 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
 
 ```json
 {"sources": ["bilibili", "douyin"], "brief": "改成15秒短视频", "filters": {"types": ["ugc"]},
- "callback_url": "...", "external_id": "..."}
+ "depth": "deep", "target_count": 80, "callback_url": "...", "external_id": "..."}
 ```
 
-所有字段可选：`sources` 不传则用全部渠道，`brief` 不传则沿用原简报，`filters` 不传则沿用原筛选条件。返回新的 `task_id`，会生成新的 `run_id`。
+所有字段可选：`sources` 不传则用全部渠道；`brief`、`filters`、`depth`、`target_count` 不传则沿用原检索的设置（`target_count: 0` 表示取消目标数量）。返回新的 `task_id`，会生成新的 `run_id`。
 
 ### 5.7 POST /runs/{run_id}/downloads
 

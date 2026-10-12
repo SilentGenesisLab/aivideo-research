@@ -26,6 +26,12 @@
   .drop { border:2px dashed var(--line); border-radius:10px; height:220px; display:flex; align-items:center;
           justify-content:center; text-align:center; color:var(--muted); cursor:pointer; overflow:hidden; }
   .drop img { max-width:100%; max-height:100%; object-fit:contain; }
+  .dropwrap { position:relative; align-self:start; }
+  .clearimg { position:absolute; top:8px; right:8px; width:28px; height:28px; padding:0; border-radius:50%;
+              background:rgba(0,0,0,.6); color:#fff; font-size:18px; line-height:28px; text-align:center; }
+  .clearimg:hover { background:var(--bad); }
+  .clearimg:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .draftnote { font-size:12px; color:var(--muted); margin-top:6px; text-align:center; }
   textarea { width:100%; min-height:80px; resize:vertical; padding:10px; border-radius:8px;
              border:1px solid var(--line); background:var(--bg); color:var(--text); font:inherit; }
   .opts { display:flex; flex-wrap:wrap; gap:14px 22px; margin:12px 0; align-items:center; }
@@ -138,8 +144,12 @@
 
   <div class="card">
     <div class="form">
-      <label class="drop" id="drop"><span>点击或拖入产品图<br><small>jpg / png / webp</small></span>
-        <input type="file" id="file" accept="image/*" hidden></label>
+      <div class="dropwrap">
+        <label class="drop" id="drop"><span>点击或拖入产品图<br><small>jpg / png / webp</small></span>
+          <input type="file" id="file" accept="image/*" hidden></label>
+        <button type="button" class="clearimg hidden" id="clearimg" aria-label="删除这张图片" title="删除这张图片">×</button>
+        <div class="draftnote" id="draftnote"></div>
+      </div>
       <div>
         <textarea id="brief" placeholder="（可选）补充简报：商业目标、目标人群、想要的调性、竞品……"></textarea>
         <div style="margin:10px 0 4px"><span class="note">检索渠道（<span id="srccount">0</span> 个）　</span>
@@ -160,7 +170,14 @@
           </div>
         </div>
         <div class="opts">
-          <label>每词取 <input type="number" id="perq" value="8" min="3" max="20"> 条</label>
+          <label title="快速：每个维度每种语言 1 个关键词，每词取 6 条；标准：2 个关键词、8 条；深度：3 个关键词、15 条，AI 也会多看一些候选">检索深度
+            <select id="depth"><option value="quick">快速</option><option value="standard" selected>标准</option>
+              <option value="deep">深度</option></select></label>
+          <label title="大致的结果总数，会分到各参考维度；达标视频不够时会少于这个数">目标数量 约
+            <input type="number" id="tcount" value="50" min="5" max="200" style="width:64px"> 条</label>
+          <span class="note" id="est"></span>
+        </div>
+        <div class="opts">
           <label>时长 <input type="number" id="mindur" value="0" min="0" max="3600" style="width:64px"> ~
             <input type="number" id="maxdur" value="300" min="15" max="3600" style="width:72px"> 秒</label>
           <label>AI 评分 ≥ <select id="minscore"><option>3</option><option>4</option><option selected>5</option>
@@ -218,11 +235,84 @@ $("#file").onchange = e => setFile(e.target.files[0]);
 $("#drop").ondragover = e => e.preventDefault();
 $("#drop").ondrop = e => { e.preventDefault(); setFile(e.dataTransfer.files[0]); };
 $("#dlmode").onchange = e => $("#topwrap").classList.toggle("hidden", e.target.value !== "top");
-function setFile(f) {
+const DROP_EMPTY = $("#drop").innerHTML;
+let fileUrl = null;
+function setFile(f, save = true) {
   if (!f) return; file = f;
-  $("#drop").innerHTML = `<img src="${URL.createObjectURL(f)}">`;
+  if (fileUrl) URL.revokeObjectURL(fileUrl);
+  fileUrl = URL.createObjectURL(f);
+  $("#drop").innerHTML = `<img src="${fileUrl}" alt="产品图"><input type="file" id="file" accept="image/*" hidden>`;
+  $("#file").onchange = e => setFile(e.target.files[0]);
+  $("#clearimg").classList.remove("hidden");
   $("#go").disabled = false;
+  if (save) idb("put", f);
 }
+function clearImage() {
+  file = null;
+  if (fileUrl) URL.revokeObjectURL(fileUrl), fileUrl = null;
+  $("#drop").innerHTML = DROP_EMPTY;
+  $("#file").onchange = e => setFile(e.target.files[0]);
+  $("#clearimg").classList.add("hidden");
+  $("#draftnote").textContent = "";
+  $("#go").disabled = true;
+  idb("delete");
+}
+$("#clearimg").onclick = clearImage;
+
+// ---------- 草稿持久化（只存在本浏览器）：图片放 IndexedDB（可能有几 MB），其余放 localStorage ----------
+// 读写失败（隐私模式、存储被禁用）时静默跳过，页面照常可用
+function idb(op, value) {
+  return new Promise(resolve => {
+    try {
+      const req = indexedDB.open("rvs-draft", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("kv");
+      req.onerror = () => resolve(null);
+      req.onsuccess = () => {
+        try {
+          const tx = req.result.transaction("kv", op === "get" ? "readonly" : "readwrite"), st = tx.objectStore("kv");
+          const r = op === "get" ? st.get("image") : op === "put" ? st.put(value, "image") : st.delete("image");
+          r.onsuccess = () => resolve(op === "get" ? r.result : true);
+          r.onerror = () => resolve(null);
+        } catch (e) { resolve(null); }
+      };
+    } catch (e) { resolve(null); }
+  });
+}
+const DRAFT_KEY = "rvs.draft.v2";
+let draft = (() => {
+  try {
+    const d = JSON.parse(localStorage.getItem(DRAFT_KEY));
+    if (d) return d;
+    const old = JSON.parse(localStorage.getItem("rvs.filters.v1"));  // 旧版只存了筛选条件
+    if (old) return {filters: old, min_score: old.min_score};
+  } catch (e) {}
+  return {};
+})();
+let draftTimer = null;
+function saveDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    draft = {brief: $("#brief").value, sources: document.querySelector(".pf") ? checkedSources() : draft.sources,
+             filters: document.querySelector("#ftypes .tchip") ? formFilters() : draft.filters,
+             min_score: $("#minscore").value, depth: $("#depth").value, target_count: $("#tcount").value,
+             dlmode: $("#dlmode").value, dltop: $("#dltop").value};
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch (e) {}
+  }, 300);
+}
+function restoreDraft() {
+  const d = draft;
+  if (d.brief != null) $("#brief").value = d.brief;
+  if (d.min_score) $("#minscore").value = d.min_score;
+  if (d.depth) $("#depth").value = d.depth;
+  if (d.target_count) $("#tcount").value = d.target_count;
+  if (d.dlmode) { $("#dlmode").value = d.dlmode; $("#topwrap").classList.toggle("hidden", d.dlmode !== "top"); }
+  if (d.dltop) $("#dltop").value = d.dltop;
+  idb("get").then(f => {
+    if (f && !file) { setFile(f, false); $("#draftnote").textContent = "已恢复上次的图片，点右上角 × 可删除"; }
+  });
+}
+// 表单里任何改动都存草稿（类型标签是点击切换的，所以也监听 click）
+["input", "change", "click"].forEach(ev => document.querySelector(".form").addEventListener(ev, () => { saveDraft(); updEstimate(); }));
 
 // ---------- 类型与筛选（检索前） ----------
 let TYPES = [];
@@ -233,15 +323,8 @@ function formFilters() {
           keywords: words($("#fkw").value), must: words($("#fmust").value), exclude: words($("#fex").value),
           min_duration: +$("#mindur").value || 0, max_duration: +$("#maxdur").value || 0};
 }
-// 记住上次的筛选（只存在本浏览器，读写失败就用默认值）
-const FORM_KEY = "rvs.filters.v1";
-function saveForm() {
-  try { localStorage.setItem(FORM_KEY, JSON.stringify({...formFilters(), min_score: $("#minscore").value})); } catch (e) {}
-}
 function restoreForm() {
-  let f = null;
-  try { f = JSON.parse(localStorage.getItem(FORM_KEY)); } catch (e) {}
-  f = f || {exclude: ["合集", "教程", "解说", "盘点", "reaction", "compilation", "tutorial"]};
+  const f = draft.filters || {exclude: ["合集", "教程", "解说", "盘点", "reaction", "compilation", "tutorial"]};
   document.querySelectorAll("#ftypes .tchip").forEach(c => setChip(c, (f.types || []).includes(c.dataset.k)));
   document.querySelector(`[name=tmode][value=${f.type_mode === "only" ? "only" : "prefer"}]`).checked = true;
   $("#adonly").checked = !!f.ad_only;
@@ -249,7 +332,7 @@ function restoreForm() {
   $("#fex").value = (f.exclude || []).join(" ");
   if (f.min_duration != null) $("#mindur").value = f.min_duration;
   if (f.max_duration) $("#maxdur").value = f.max_duration;
-  if (f.min_score) $("#minscore").value = f.min_score;
+  updEstimate();
 }
 function setChip(c, on) { c.classList.toggle("on", on); c.setAttribute("aria-pressed", on); }
 function renderTypes(list) {
@@ -264,7 +347,6 @@ function renderTypes(list) {
 }
 
 const checkedSources = () => [...document.querySelectorAll(".pf:checked")].map(c => c.value);
-function updSrcCount() { $("#srccount").textContent = checkedSources().length; }
 
 function loadSources() { return swrJSON("/api/sources", renderSources); }
 function renderSources(list) {
@@ -272,12 +354,29 @@ function renderSources(list) {
   list.forEach(s => (groups[s.group] = groups[s.group] || []).push(s));
   $("#sources").innerHTML = Object.entries(groups).map(([g, items]) =>
     `<div class="srcgrp"><b>${esc(g)}</b>${items.map(s =>
-      `<label><input type="checkbox" class="pf" value="${esc(s.key)}" checked> ${esc(s.name)}</label>`).join("")}</div>`).join("");
+      `<label><input type="checkbox" class="pf" value="${esc(s.key)}" ${!draft.sources || draft.sources.includes(s.key) ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>`).join("");
+  SOURCES = list;
   document.querySelectorAll(".pf").forEach(c => c.onchange = updSrcCount);
   updSrcCount();
 }
-$("#srcall").onclick = () => { document.querySelectorAll(".pf").forEach(c => c.checked = true); updSrcCount(); };
-$("#srcnone").onclick = () => { document.querySelectorAll(".pf").forEach(c => c.checked = false); updSrcCount(); };
+function updSrcCount() { $("#srccount").textContent = checkedSources().length; updEstimate(); }
+$("#srcall").onclick = () => { document.querySelectorAll(".pf").forEach(c => c.checked = true); updSrcCount(); saveDraft(); };
+$("#srcnone").onclick = () => { document.querySelectorAll(".pf").forEach(c => c.checked = false); updSrcCount(); saveDraft(); };
+
+// 按深度、渠道、维度数估算检索次数和耗时（粗略，实际受平台响应和 AI 速度影响）
+let SOURCES = [];
+const DEPTH = {quick: {q: 1, per: 6, cand: 40}, standard: {q: 2, per: 8, cand: 90}, deep: {q: 3, per: 15, cand: 160}};
+function updEstimate() {
+  if (!SOURCES.length) return;
+  const d = DEPTH[$("#depth").value] || DEPTH.standard, picked = new Set(checkedSources());
+  const langs = SOURCES.filter(s => picked.has(s.key)).reduce((n, s) => n + (s.languages || ["zh"]).length, 0);
+  const f = document.querySelector("#ftypes .tchip") ? formFilters() : {};
+  const dims = 5 + ((f.types || []).length || (f.keywords || []).length ? 1 : 0);
+  const searches = dims * d.q * langs, perDim = Math.ceil((+$("#tcount").value || 50) / dims);
+  const rank = dims * Math.ceil(Math.min(250, Math.max(d.cand, perDim * 3)) / 25);
+  const sec = 30 + searches * 0.6 + rank * 3;
+  $("#est").textContent = langs ? `预计约 ${searches} 次检索 · ${sec < 90 ? "1~2" : sec < 200 ? "2~4" : sec < 400 ? "4~7" : "7~12"} 分钟` : "";
+}
 
 function loadHistory() { return swrJSON("/api/runs", renderHistory); }
 function renderHistory(runs) {
@@ -295,12 +394,15 @@ function renderHistory(runs) {
 }
 $("#histreload").onclick = loadHistory;
 
+const VIEW_KEY = "rvs.view.v1";
+function rememberView(v) { try { localStorage.setItem(VIEW_KEY, JSON.stringify(v)); } catch (e) {} }
 function userView(id) { live.show = false; viewRun(id); }  // 用户主动查看别的结果：中间态不再覆盖页面
 
-async function viewRun(id, scroll = true) {
+async function viewRun(id, scroll = true, quiet = false) {
   const r = await fetch(`/runs/${encodeURIComponent(id)}/result.json`, {cache: "no-store"});
-  if (!r.ok) return alert("读取失败");
+  if (!r.ok) { if (!quiet) alert("读取失败"); else rememberView({}); return; }
   render(await r.json());
+  if (!live.id) rememberView({run: id});
   loadHistory();
   if (scroll) $("#out").scrollIntoView({behavior: "smooth"});
 }
@@ -365,7 +467,8 @@ function rerun(id) {
   const pfs = checkedSources();
   if (!pfs.length) return alert("请至少勾选一个检索渠道");
   submitTask(fetch("/api/rerun", {method: "POST", headers: {"Content-Type": "application/json"},
-                                  body: JSON.stringify({run_id: id, platforms: pfs, filters: formFilters()})}), "重新检索");
+                                  body: JSON.stringify({run_id: id, platforms: pfs, filters: formFilters(),
+                                                        depth: $("#depth").value, target_count: +$("#tcount").value || 0})}), "重新检索");
 }
 
 $("#go").onclick = () => {
@@ -374,9 +477,9 @@ $("#go").onclick = () => {
   const fd = new FormData();
   fd.append("image", file); fd.append("brief", $("#brief").value);
   fd.append("platforms", pfs.join(","));
-  fd.append("per_query", $("#perq").value); fd.append("max_duration", $("#maxdur").value);
+  fd.append("depth", $("#depth").value); fd.append("target_count", +$("#tcount").value || 50);
+  fd.append("max_duration", $("#maxdur").value);
   fd.append("min_score", $("#minscore").value); fd.append("filters", JSON.stringify(formFilters()));
-  saveForm();
   fd.append("download_mode", $("#dlmode").value); fd.append("download_top", $("#dltop").value);
   submitTask(fetch("/api/search", {method: "POST", body: fd}), $("#brief").value.trim().slice(0, 20) || file.name);
 };
@@ -387,6 +490,7 @@ const live = {id: null, rev: -1, timer: null, show: true, shown: false, label: "
 const STEPS = [["识别产品", 0], ["多平台检索", 15], ["AI 评估", 55], ["完成", 100]];
 function watch(id, label) {
   Object.assign(live, {id, rev: -1, show: true, shown: false, label});
+  rememberView({task: id, label});
   pollLive();
 }
 function showProgress(t) {
@@ -408,8 +512,11 @@ async function pollLive() {
   const id = live.id;
   if (!id) return;
   let t;
-  try { t = await (await fetch(`/api/tasks/${id}`, {cache: "no-store"})).json(); }
-  catch (e) { live.timer = setTimeout(pollLive, 3000); return; }
+  try {
+    const r = await fetch(`/api/tasks/${id}`, {cache: "no-store"});
+    if (r.status === 404) { live.id = null; rememberView({}); $("#prog").classList.add("hidden"); return; }  // 任务记录已清理
+    t = await r.json();
+  } catch (e) { live.timer = setTimeout(pollLive, 3000); return; }
   if (id !== live.id) return;  // 期间换了跟踪对象
   showProgress(t);
   const p = t.partial;
@@ -420,7 +527,7 @@ async function pollLive() {
   }
   if (t.status === "done" || t.status === "error") {
     live.id = null;
-    if (t.status === "error") $("#log").innerHTML = `<span class="err">任务失败：${esc(t.title)}：${esc(t.error)}</span>`;
+    if (t.status === "error") { $("#log").innerHTML = `<span class="err">任务失败：${esc(t.title)}：${esc(t.error)}</span>`; rememberView({}); }
     else {
       $("#log").textContent = `已完成：${t.title}`;
       if (t.kind === "search" && live.show) await viewRun(t.run_id, !live.shown);
@@ -450,7 +557,8 @@ function render(res) {
       · 打完分的维度先显示，全部完成后会再跨维度去重，条目可能略有变化</p>
       <div class="srcchips">${Object.entries(res.searched || {}).sort((a, b) => b[1] - a[1])
         .map(([k, n]) => `<span>${esc(k)} ${n}</span>`).join("")}</div></div>` : `
-    <p class="note">检索 ${s.queries} 次 · 原始 ${s.raw} 条 · 保留 ${s.kept} 条 · ${s.seconds}s ·
+    <p class="note">${res.options ? `${esc({quick: "快速", standard: "标准", deep: "深度"}[res.options.depth] || "")}检索 · ` : ""}检索 ${s.queries} 次 · 原始 ${s.raw} 条 ·
+    保留 ${s.kept} 条${s.target ? `（目标 ${s.target}${s.kept < s.target * 0.8 ? "，达标视频不够，可提高检索深度、多选渠道或降低评分门槛" : ""}）` : ""} · ${s.seconds}s ·
     来源分布：${esc(Object.entries(res.groups.flatMap(g => g.videos).reduce((m, v) => (m[v.platform] = (m[v.platform] || 0) + 1, m), {})).map(([k, n]) => k + " " + n).join("、"))} ·
     <a href="/runs/${esc(res.run_id)}/report.md" target="_blank">Markdown 报告</a> ·
     参考点由 AI 依据标题推断，请看片核实</p>
@@ -609,13 +717,20 @@ $("#dlbtn").onclick = () => {
 };
 let DIRECT = new Set();
 fetch("/api/direct_platforms").then(r => r.json()).then(a => DIRECT = new Set(a)).catch(() => {});
+restoreDraft();
 swrJSON("/api/video_types", renderTypes);
 loadSources();
 loadHistory();
 refreshTasks();
-// 从数据看板跳转过来：/#run=<run_id>
+// 从数据看板跳转过来：/#run=<run_id>；否则恢复刷新前在看的结果或在跟踪的任务
 const hashRun = decodeURIComponent((location.hash.match(/^#run=([\w-]+)/) || [])[1] || "");
 if (hashRun) viewRun(hashRun);
+else {
+  let v = {};
+  try { v = JSON.parse(localStorage.getItem(VIEW_KEY)) || {}; } catch (e) {}
+  if (v.task) { follow = v.task; Object.assign(live, {id: v.task, rev: -1, show: true, shown: true, label: v.label || ""}); pollLive(); }
+  else if (v.run) viewRun(v.run, false, true).catch(() => {});
+}
 </script>
 </body>
 </html>

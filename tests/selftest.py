@@ -59,6 +59,15 @@ def offline():
         check("run_id 路径穿越防护", True)
 
 
+def offline_depth():
+    from refsearch.pipeline import DEPTHS, allocate
+    check("名额分配：平均分、不够的让给有余量的维度",
+          allocate({"a": [0] * 20, "b": [0] * 2, "c": [0] * 5}, 20) == {"a": 13, "b": 2, "c": 5})
+    check("名额分配：达标总数不够时取全部", allocate({"a": [0] * 3, "b": [0]}, 20) == {"a": 3, "b": 1})
+    check("深度越深关键词和每词条数越多",
+          [d["queries"] for d in DEPTHS.values()] == [1, 2, 3] and DEPTHS["deep"]["per_query"] > DEPTHS["quick"]["per_query"])
+
+
 def offline_filters():
     from refsearch import filters as flt
     f = flt.normalize({"types": ["ugc", "tvc", "bogus"], "type_mode": "only", "keywords": "开学季 vlog",
@@ -270,6 +279,7 @@ def online(image):
 if __name__ == "__main__":
     offline()
     offline_filters()
+    offline_depth()
     if len(sys.argv) > 1:
         online(sys.argv[1])
     print(f"\n通过 {len(PASS)}，失败 {len(FAIL)}" + (f"：{FAIL}" if FAIL else ""))

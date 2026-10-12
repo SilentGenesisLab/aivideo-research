@@ -229,7 +229,12 @@ def health():
 
 @app.get("/api/sources")
 def sources():
-    return [{"key": k, "name": v[2], "group": v[3]} for k, v in SOURCES.items()]
+    return [{"key": k, "name": v[2], "group": v[3], "languages": list(v[1])} for k, v in SOURCES.items()]
+
+
+@app.get("/api/depths")
+def depths():
+    return [{"key": k, **v} for k, v in pipeline.DEPTHS.items()]
 
 
 @app.get("/api/video_types")
@@ -254,6 +259,8 @@ class RerunReq(BaseModel):
     platforms: list[str] = []
     brief: str | None = None
     filters: dict | None = None  # 不传则沿用原筛选条件
+    depth: str | None = None  # 不传则沿用原检索深度
+    target_count: int | None = None  # 不传则沿用原目标数量；0 表示不设目标
 
 
 @app.post("/api/rerun")
@@ -267,9 +274,14 @@ def rerun(req: RerunReq):
     brief = old.get("brief", "") if req.brief is None else req.brief
 
     f = filters.normalize(old.get("filters") if req.filters is None else req.filters)
+    o = old.get("options") or {}
+    depth = req.depth or o.get("depth") or "standard"
+    target = o.get("target_count") if req.target_count is None else (req.target_count or None)
 
     def work(progress):
-        return pipeline.run_search(str(image), brief, pfs, filters=f, progress=progress)
+        return pipeline.run_search(str(image), brief, pfs, filters=f, depth=depth, target_count=target,
+                                   min_score=o.get("min_score", 5), max_duration=o.get("max_duration", 300),
+                                   progress=progress)
 
     title = (old.get("analysis", {}).get("product", {}).get("name") or brief or req.run_id)[:40]
     return {"job_id": tasks.submit("search", f"重新检索：{title}", work,
@@ -279,7 +291,8 @@ def rerun(req: RerunReq):
 
 @app.post("/api/search")
 async def search(image: UploadFile = File(...), brief: str = Form(""),
-                 platforms: str = Form(",".join(pipeline.DEFAULT_SOURCES)), per_query: int = Form(8),
+                 platforms: str = Form(",".join(pipeline.DEFAULT_SOURCES)), per_query: int | None = Form(None),
+                 depth: str = Form("standard"), target_count: int | None = Form(None),
                  max_duration: int = Form(300), download_mode: str = Form("none"),
                  download_top: int = Form(5), min_score: int = Form(5), filters: str = Form("")):
     suffix = Path(image.filename or "x.jpg").suffix.lower()
@@ -301,6 +314,7 @@ async def search(image: UploadFile = File(...), brief: str = Form(""),
         try:
             return pipeline.run_search(str(tmp), brief, pfs, per_query, max_duration,
                                        min_score=min_score, download_mode=download_mode,
+                                       depth=depth, target_count=target_count,
                                        download_top=download_top, filters=f, progress=progress)
         finally:
             tmp.unlink(missing_ok=True)

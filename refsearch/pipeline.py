@@ -59,16 +59,47 @@ def load_partial(run_id: str) -> dict | None:
 
 
 DEFAULT_SOURCES = tuple(SOURCES)
-MAX_CANDIDATES = 90  # 每个维度送去打分的候选上限，控制 DeepSeek 成本
 RANK_BATCH = 25
+# 检索深度：每个维度每种语言几个关键词、每个关键词每个渠道取几条、每个维度最多送多少条给 AI 打分（控制成本）
+DEPTHS = {
+    "quick": {"name": "快速", "queries": 1, "per_query": 6, "candidates": 40, "type_queries": 2},
+    "standard": {"name": "标准", "queries": 2, "per_query": 8, "candidates": 90, "type_queries": 4},
+    "deep": {"name": "深度", "queries": 3, "per_query": 15, "candidates": 160, "type_queries": 6},
+}
+MAX_CANDIDATES_CAP = 250
+TARGET_RANGE = (5, 200)
+
+
+def allocate(eligible: dict[str, list], total: int) -> dict[str, int]:
+    """把目标总数轮流分给各维度；某维度达标视频不够时，名额让给还有余量的维度。"""
+    alloc = {k: 0 for k in eligible}
+    while total > 0:
+        moved = False
+        for k, vids in eligible.items():
+            if total > 0 and alloc[k] < len(vids):
+                alloc[k] += 1
+                total -= 1
+                moved = True
+        if not moved:
+            break
+    return alloc
 
 
 def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
-               per_query: int = 8, max_duration: int = 300, top_per_dim: int = 10,
+               per_query: int | None = None, max_duration: int = 300, top_per_dim: int = 10,
                min_score: int = 5, download_mode: str = "none", download_top: int = 5,
                max_height: int = 720, filters: dict | None = None, extra: dict | None = None,
-               progress=_noop) -> dict:
-    """extra：要并入结果的调用方信息（如 client、external_id），中间态里也会带上。"""
+               depth: str = "standard", target_count: int | None = None, progress=_noop) -> dict:
+    """extra：要并入结果的调用方信息（如 client、external_id），中间态里也会带上。
+    depth：检索深度 quick/standard/deep；per_query 不传时取深度的默认值。
+    target_count：目标结果总数，给了就按它在各维度间分配（覆盖 top_per_dim），达标视频不够时会少于目标。"""
+    dp = DEPTHS.get(depth) or DEPTHS["standard"]
+    depth = depth if depth in DEPTHS else "standard"
+    per_query = per_query or dp["per_query"]
+    if target_count:
+        target_count = max(TARGET_RANGE[0], min(TARGET_RANGE[1], int(target_count)))
+    options = {"depth": depth, "target_count": target_count, "per_query": per_query, "top_per_dim": top_per_dim,
+               "min_score": min_score, "max_duration": max_duration}
     t0 = time.time()
     config.RUNS_DIR.mkdir(parents=True, exist_ok=True)
     base = time.strftime("%Y%m%d-%H%M%S")
@@ -86,7 +117,7 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
     platforms = [p for p in platforms if p in SEARCHERS]
     part = _Partial(run_dir, {
         "run_id": run_id, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "image": img_copy.name,
-        "brief": brief, "sources": list(platforms), "filters": f, **(extra or {}),
+        "brief": brief, "sources": list(platforms), "filters": f, "options": options, **(extra or {}),
         "analysis": None, "groups": [], "platform_links": [], "errors": [], "downloads": [],
         "stats": {"queries": 0, "raw": 0, "kept": 0, "seconds": 0},
         "searched": {}, "progress": {"pct": 0, "stage": "", "rev": 0}}, progress)
@@ -97,8 +128,8 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
     part.set(3, "识别产品", force=True)
     if flt.describe(f):
         progress(f"筛选条件：{flt.describe(f)}")
-    analysis = analyze_product(str(img_copy), brief, flt.prompt_hint(f))
-    if (td := flt.type_dimension(analysis, f)):
+    analysis = analyze_product(str(img_copy), brief, flt.prompt_hint(f), n_queries=dp["queries"])
+    if (td := flt.type_dimension(analysis, f, dp["type_queries"])):
         analysis["dimensions"].insert(0, td)
     p = analysis["product"]
     progress(f"识别为：{p.get('brand','')} {p.get('name','')}（{p.get('category','')}），"
@@ -157,7 +188,11 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
     # 3. 重排（各维度并行）
     progress("③ AI 评估相关性并标注参考点…")
     dims = [d for d in analysis["dimensions"] if by_dim.get(d["key"])]
-    cands = {d["key"]: _balanced(list(by_dim[d["key"]].values()), MAX_CANDIDATES, keep_order=True) for d in dims}
+    n_dims = max(1, len(analysis["dimensions"]))
+    per_dim = -(-target_count // n_dims) if target_count else top_per_dim  # 每个维度大致的名额
+    # 候选至少是名额的 3 倍，才挑得出够数的达标视频
+    max_cands = min(MAX_CANDIDATES_CAP, max(dp["candidates"], per_dim * 3))
+    cands = {d["key"]: _balanced(list(by_dim[d["key"]].values()), max_cands, keep_order=True) for d in dims}
     n_batches = sum(-(-len(c) // RANK_BATCH) for c in cands.values())
     b_done, shown = [0], set()
     part.set(55, "AI 评估", force=True)
@@ -172,7 +207,7 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
         with part.lock:
             keep = [v for v in vids if v["url"] not in shown and not flt.post_filter(v, f)
                     and v.get("score", 0) >= min_score]
-            keep = _balanced(keep, top_per_dim)
+            keep = _balanced(keep, per_dim)
             shown.update(v["url"] for v in keep)
             for v in keep:
                 v["vtype_name"] = flt.TYPE_NAMES.get(v.get("vtype"), "其他")
@@ -205,7 +240,7 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
                 best[v["url"]] = (v.get("score", 0), key)
 
     # 重排后筛选：类型、广告正片、最低分
-    groups = []
+    eligible = {}
     for d in analysis["dimensions"]:
         vids = []
         for v in ranked.get(d["key"], []):
@@ -217,22 +252,26 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
             else:
                 v["vtype_name"] = flt.TYPE_NAMES.get(v.get("vtype"), "其他")
                 vids.append(v)
-        groups.append({**d, "videos": _balanced(vids, top_per_dim)})
+        eligible[d["key"]] = vids
+    quota = allocate(eligible, target_count) if target_count else {k: top_per_dim for k in eligible}
+    groups = [{**d, "videos": _balanced(eligible[d["key"]], quota[d["key"]])} for d in analysis["dimensions"]]
 
     result = {
         "run_id": run_id, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "image": img_copy.name, "brief": brief, "sources": list(platforms), "analysis": analysis,
-        "filters": f,
+        "filters": f, "options": options,
         "groups": groups, "platform_links": links, **(extra or {}),
         "stats": {"queries": len(tasks), "raw": len(raw),
-                  "kept": sum(len(g["videos"]) for g in groups),
+                  "kept": sum(len(g["videos"]) for g in groups), "target": target_count,
+                  "eligible": sum(len(v) for v in eligible.values()),
                   "filtered": {k: len(v) for k, v in dropped.items()},
                   "seconds": round(time.time() - t0, 1)},
         "errors": errors, "downloads": [],
     }
     save(result)
     part.done()
-    progress(f"完成检索：保留 {result['stats']['kept']} 条参考视频，用时 {result['stats']['seconds']}s")
+    progress(f"完成检索：保留 {result['stats']['kept']} 条参考视频"
+             + (f"（目标 {target_count} 条）" if target_count else "") + f"，用时 {result['stats']['seconds']}s")
 
     # 4. 可选下载
     if download_mode != "none":

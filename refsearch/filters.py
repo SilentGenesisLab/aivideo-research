@@ -84,7 +84,7 @@ def _is_en(w: str) -> bool:
     return not re.search(r"[一-鿿]", w)
 
 
-def type_dimension(analysis: dict, f: dict) -> dict | None:
+def type_dimension(analysis: dict, f: dict, max_queries: int = MAX_TYPE_QUERIES) -> dict | None:
     """按目标类型和附加关键词拼出一组定向检索词，作为单独的“类型定向”维度。"""
     if not f["types"] and not f["keywords"]:
         return None
@@ -102,7 +102,7 @@ def type_dimension(analysis: dict, f: dict) -> dict | None:
     kw = [(w, _is_en(w)) for w in f["keywords"]]  # 附加关键词排在类型词前面，名额优先给它们
     zh = [f"{core_zh} {w}" for w, en_ in kw if not en_] + zh
     en = [f"{core_en} {w}" for w, en_ in kw if en_] + en
-    zh, en = list(dict.fromkeys(zh))[:MAX_TYPE_QUERIES], list(dict.fromkeys(en))[:MAX_TYPE_QUERIES]
+    zh, en = list(dict.fromkeys(zh))[:max_queries], list(dict.fromkeys(en))[:max_queries]
     if not zh and en:
         zh = en[:2]
     names = "、".join(TYPE_NAMES[t] for t in f["types"]) or "附加关键词"
