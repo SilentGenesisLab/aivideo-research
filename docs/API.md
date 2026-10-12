@@ -389,6 +389,7 @@ X-Webhook-Signature: sha256=5d41402abc4b2a76b9719d911017c592...
 ```
 
 - `event`：`task.succeeded` 或 `task.failed`。
+- 回调地址建议使用 HTTPS。
 - 你的接口返回 **2xx** 即视为送达；否则在 5 秒、30 秒、2 分钟后重试，共 4 次。
 - 可能重复送达，请用 `X-Webhook-Id`（即 task_id）去重。
 - 回调只是通知，拿到后用 `task.result_url` 取完整结果。
@@ -463,11 +464,14 @@ def callback():
 |---|---|---|
 | `API_KEYS` | 是 | 接入方与 Key，格式 `站点A:key1,站点B:key2`。生成 Key：`python3 -c "import secrets;print('sk_live_'+secrets.token_urlsafe(24))"` |
 | `WEBHOOK_SECRET` | 建议 | Webhook 签名密钥，提供给接入方用于验签 |
-| `PUBLIC_BASE_URL` | 建议 | 对外地址，如 `https://ref.example.com`。经反向代理或 HTTPS 部署时必须配置，否则返回的链接地址不对 |
+| `PUBLIC_BASE_URL` | 建议 | 对外地址，如 `https://videodata.sligenai.cn`。经反向代理或 HTTPS 部署时必须配置，否则返回的链接地址不对 |
 | `SIGNING_SECRET` | 否 | 文件签名密钥；不配置时自动生成并保存在 `runs/.signing_secret` |
 | `FILE_URL_TTL` | 否 | 文件链接有效期（秒），默认 604800（7 天） |
 | `SEARCH_WORKERS` | 否 | 同时执行的检索数，默认 2 |
 
-修改后重启服务（`docker compose up -d`）。对外提供时建议在前面加 HTTPS 反向代理（Nginx/Caddy），API Key 不要走明文 HTTP。
+修改后重启服务（`docker compose up -d` 或 `./start.sh`）。
+
+**HTTPS**：服务通过 nginx 反向代理提供 HTTPS（Let's Encrypt 证书，自动续期），配置与一键脚本见服务目录 `deploy/`（`sudo bash deploy/setup-https.sh <域名>`）。
+接入方请一律使用 `https://` 地址调用，API Key 不要经明文 HTTP 传输。
 
 验证接入是否正常：在服务目录运行 `python tests/api_test.py 产品图.jpg`（覆盖鉴权、检索、回调验签、下载、播放全流程）。

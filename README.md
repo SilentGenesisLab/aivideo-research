@@ -52,18 +52,40 @@
 - 开通：在 `.env` 配置 `API_KEYS`、`WEBHOOK_SECRET`（见 `.env_sample`），重启服务
 - 接口自测：`.venv/bin/python tests/api_test.py 产品图.jpg`
 
+## 线上地址
+
+- 系统：**https://videodata.sligenai.cn**（网页登录用户名 admin，密码见服务器 `.env` 的 `APP_PASSWORD`）
+- 接入文档：https://videodata.sligenai.cn/developer （公开）
+- 在线调试：https://videodata.sligenai.cn/api/v1/docs
+
+## 域名与 HTTPS
+
+nginx 反向代理 + Let's Encrypt 证书（certbot 自动续期），配置在 `deploy/`：
+
+```bash
+# 1. 域名 A 记录指向服务器公网 IP
+# 2. 安装站点配置并申请证书（会开启 http → https 跳转）
+sudo bash deploy/setup-https.sh videodata.sligenai.cn
+# 3. .env 设置对外地址（接口返回的链接、接入文档里的地址都用它）
+echo "PUBLIC_BASE_URL=https://videodata.sligenai.cn" >> .env
+# 4. 只允许经 HTTPS 访问，关闭 IP:8770 直连
+HOST=127.0.0.1 ./start.sh                      # Docker 部署：.env 里设 BIND_IP=127.0.0.1 后 docker compose up -d
+```
+
+证书续期由 certbot 的 systemd 定时器自动完成，可用 `sudo certbot renew --dry-run` 检查。
+
 ## Docker 部署（推荐）
 
 ```bash
 git clone git@github.com:SilentGenesisLab/aivideo-research.git && cd aivideo-research
 cp .env_sample .env && chmod 600 .env           # 填入 DEEPSEEK_API_KEY、APP_PASSWORD
-docker compose up -d --build                     # http://<服务器IP>:8770，用户名 admin
+docker compose up -d --build                     # 再按上面“域名与 HTTPS”配置 nginx 与证书
 ```
 
 - 更新：`git pull && docker compose up -d --build`
 - 日志：`docker compose logs -f`；停止：`docker compose down`
 - 数据都在宿主机 `./runs`（检索结果、下载、播放缓存、任务记录），重建容器不丢；容器设置了 `restart: unless-stopped`，服务器重启后自动拉起。
-- 端口、并发数在 `.env` 里改：`PORT`、`SEARCH_WORKERS`。
+- 端口、监听地址、并发数在 `.env` 里改：`PORT`、`BIND_IP`、`SEARCH_WORKERS`。
 
 ## 本机安装（不用 Docker）
 

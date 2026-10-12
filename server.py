@@ -67,7 +67,8 @@ async def api_log(request: Request, call_next):
     finally:
         route = request.scope.get("route")
         tpl = "/api/v1" + route.path if route is not None and hasattr(route, "path") else path
-        ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "")
+        # 经 nginx 时用它写入的 X-Real-IP（客户端无法伪造）；request.client 已由 uvicorn 按可信代理处理
+        ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "")
         stats.log_request(who, request.method, tpl, path, status, int((time.time() - t0) * 1000), ip)
 
 

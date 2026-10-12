@@ -13,7 +13,7 @@ services:
     environment:
       RUNS_DIR: /app/runs
     ports:
-      - "${PORT:-8770}:8770"
+      - "${BIND_IP:-0.0.0.0}:${PORT:-8770}:8770"   # 前面有 nginx/HTTPS 时设 BIND_IP=127.0.0.1
     volumes:
       - ./runs:/app/runs             # 检索结果、下载、播放缓存、任务记录
       # 抖音下载需要 cookies 时取消注释，并在 .env 设 DOUYIN_COOKIES_FILE=/app/secrets/douyin_cookies.txt
