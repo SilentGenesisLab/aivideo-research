@@ -29,7 +29,7 @@ APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 async def basic_auth(request: Request, call_next):
     # /api/v1 用 API Key 鉴权，/files 用签名校验，都不走网页登录
     path = request.url.path
-    public = path == "/api/health" or path.startswith(("/api/v1/", "/files/"))
+    public = path in ("/api/health", "/developer") or path.startswith(("/api/v1/", "/files/", "/developer/"))
     if APP_PASSWORD and not public:
         ok = False
         auth = request.headers.get("authorization", "")
@@ -61,6 +61,35 @@ def index():
 @app.get("/method")
 def method():
     return FileResponse(WEB / "method.html", headers=NO_CACHE)
+
+
+DOCS = Path(__file__).parent / "docs"
+EXAMPLES = {"python_client.py": "text/x-python", "node_client.mjs": "text/javascript"}
+
+
+@app.get("/developer", include_in_schema=False)
+def developer(request: Request):
+    """对外接入文档（公开，不需要登录）：渲染 docs/API.md，并把示例地址换成本服务的实际地址。"""
+    import html
+    import markdown
+    from markdown.extensions.toc import slugify_unicode
+
+    base = html.escape(security.absolute(f"{request.url.scheme}://{request.url.netloc}/", "").rstrip("/"))
+    src = (DOCS / "API.md").read_text(encoding="utf-8")
+    src = src.replace("https://<服务地址>", base).replace("<服务地址>", base.split("://", 1)[1])
+    md = markdown.Markdown(extensions=["tables", "fenced_code", "toc"],
+                           extension_configs={"toc": {"slugify": slugify_unicode, "toc_depth": "2-3"}})
+    body = md.convert(src)
+    page = (WEB / "developer.html").read_text(encoding="utf-8")
+    return Response(page.replace("{{TOC}}", md.toc).replace("{{CONTENT}}", body),
+                    media_type="text/html; charset=utf-8", headers=NO_CACHE)
+
+
+@app.get("/developer/examples/{name}", include_in_schema=False)
+def developer_example(name: str):
+    if name not in EXAMPLES:
+        raise HTTPException(404, "示例不存在")
+    return FileResponse(Path(__file__).parent / "examples" / name, media_type=f"{EXAMPLES[name]}; charset=utf-8")
 
 
 @app.get("/api/health")

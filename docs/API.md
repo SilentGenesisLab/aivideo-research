@@ -2,9 +2,9 @@
 
 把“上传产品图 → 找参考广告片”作为模块接入你自己的网站。
 
-- **在线调试**：`https://<服务地址>/api/v1/docs`（Swagger，点 Authorize 填 API Key 即可直接调用）
-- **OpenAPI 规范**：`https://<服务地址>/api/v1/openapi.json`（可导入 Postman/Apifox，或生成各语言 SDK）
-- **示例代码**：仓库 `examples/` 目录
+- **在线调试**：[https://<服务地址>/api/v1/docs](https://<服务地址>/api/v1/docs)（Swagger，点 Authorize 填 API Key 即可直接调用）
+- **OpenAPI 规范**：[https://<服务地址>/api/v1/openapi.json](https://<服务地址>/api/v1/openapi.json)（可导入 Postman/Apifox，或生成各语言 SDK）
+- **示例代码**：[Python](https://<服务地址>/developer/examples/python_client.py) · [Node.js](https://<服务地址>/developer/examples/node_client.mjs)
 
 ---
 
@@ -470,4 +470,4 @@ def callback():
 
 修改后重启服务（`docker compose up -d`）。对外提供时建议在前面加 HTTPS 反向代理（Nginx/Caddy），API Key 不要走明文 HTTP。
 
-验证接入是否正常：`python tests/api_test.py 产品图.jpg`（覆盖鉴权、检索、回调验签、下载、播放全流程）。
+验证接入是否正常：在服务目录运行 `python tests/api_test.py 产品图.jpg`（覆盖鉴权、检索、回调验签、下载、播放全流程）。

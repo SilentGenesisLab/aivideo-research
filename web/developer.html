@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考视频检索 API 文档</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2129; --muted:#6b7280; --line:#e5e7eb;
+          --accent:#2563eb; --accent-soft:#eff4ff; --code-bg:#0f172a; --code-text:#e2e8f0; --inline:#eef1f5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111317; --card:#1b1e24; --text:#e6e8eb; --muted:#9aa1ab; --line:#2c313a;
+            --accent:#6b9bff; --accent-soft:#1f2a40; --code-bg:#0b0f17; --inline:#262b33; }
+  }
+  * { box-sizing:border-box; }
+  html { scroll-padding-top:72px; scroll-behavior:smooth; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:15px/1.75 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  a { color:var(--accent); }
+  header { position:sticky; top:0; z-index:10; background:var(--card); border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:16px; padding:12px 20px; }
+  header .t { font-weight:700; font-size:16px; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  header a.btn { font-size:13px; text-decoration:none; border:1px solid var(--accent); border-radius:8px; padding:5px 12px; white-space:nowrap; }
+  header a.btn.solid { background:var(--accent); color:#fff; }
+  #menu { display:none; background:none; border:1px solid var(--line); color:var(--text); border-radius:8px; padding:4px 10px; font-size:13px; }
+  .layout { max-width:1240px; margin:0 auto; display:grid; grid-template-columns:260px minmax(0,1fr); gap:28px; padding:24px 20px 80px; }
+  nav { position:sticky; top:72px; align-self:start; max-height:calc(100vh - 92px); overflow-y:auto; font-size:13px; }
+  nav ul { list-style:none; padding:0; margin:0; } nav ul ul { padding-left:14px; }
+  nav li a { display:block; padding:4px 10px; border-radius:6px; color:var(--muted); text-decoration:none; }
+  nav li a:hover { color:var(--text); background:var(--accent-soft); }
+  nav li a.on { color:var(--accent); background:var(--accent-soft); font-weight:600; }
+  nav > .toc > ul > li > ul { display:block; }
+  main { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:28px 36px; min-width:0; }
+  main h1 { font-size:26px; margin:0 0 12px; }
+  main h2 { font-size:20px; margin:40px 0 12px; padding-top:20px; border-top:1px solid var(--line); }
+  main h3 { font-size:16px; margin:28px 0 8px; }
+  main hr { display:none; }
+  main table { width:100%; border-collapse:collapse; font-size:14px; margin:10px 0; display:block; overflow-x:auto; }
+  main th, main td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  main th { color:var(--muted); font-weight:500; white-space:nowrap; background:var(--bg); }
+  main code { background:var(--inline); padding:1px 6px; border-radius:4px; font:13px ui-monospace,Menlo,Consolas,monospace; word-break:break-word; }
+  main pre { position:relative; background:var(--code-bg); color:var(--code-text); border-radius:10px; padding:14px 16px;
+             overflow-x:auto; font-size:13px; line-height:1.6; }
+  main pre code { background:none; padding:0; color:inherit; word-break:normal; }
+  main pre .copy { position:absolute; top:8px; right:8px; background:rgba(255,255,255,.12); color:#e2e8f0; border:0;
+                   border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; opacity:0; transition:opacity .15s; }
+  main pre:hover .copy, main pre .copy:focus { opacity:1; }
+  main blockquote { margin:10px 0; padding:4px 14px; border-left:3px solid var(--accent); color:var(--muted); }
+  main ul, main ol { padding-left:22px; }
+  @media (max-width:900px) {
+    .layout { grid-template-columns:1fr; padding:16px 16px 60px; }
+    nav { display:none; position:fixed; top:56px; left:0; right:0; max-height:70vh; background:var(--card);
+          border-bottom:1px solid var(--line); padding:10px 16px; z-index:9; }
+    nav.open { display:block; }
+    #menu { display:inline-block; }
+    main { padding:20px 16px; }
+    header .hide-sm { display:none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <button id="menu">目录</button>
+  <span class="t">参考视频检索 · API 接入文档</span>
+  <a class="btn hide-sm" href="/api/v1/openapi.json" target="_blank">OpenAPI</a>
+  <a class="btn solid" href="/api/v1/docs" target="_blank">在线调试</a>
+</header>
+<div class="layout">
+  <nav id="nav">{{TOC}}</nav>
+  <main id="doc">{{CONTENT}}</main>
+</div>
+<script>
+// 代码块复制按钮
+document.querySelectorAll("main pre").forEach(pre => {
+  const b = document.createElement("button");
+  b.className = "copy"; b.textContent = "复制";
+  b.onclick = async () => {
+    try { await navigator.clipboard.writeText(pre.querySelector("code").innerText); b.textContent = "已复制"; }
+    catch (e) { b.textContent = "复制失败"; }
+    setTimeout(() => b.textContent = "复制", 1500);
+  };
+  pre.appendChild(b);
+});
+// 目录高亮当前章节
+const links = [...document.querySelectorAll("nav a")];
+const heads = links.map(a => document.getElementById(decodeURIComponent(a.hash.slice(1)))).filter(Boolean);
+const spy = () => {
+  let cur = heads[0];
+  for (const h of heads) if (h.getBoundingClientRect().top < 100) cur = h;
+  links.forEach(a => a.classList.toggle("on", cur && decodeURIComponent(a.hash.slice(1)) === cur.id));
+};
+document.addEventListener("scroll", spy, {passive: true}); spy();
+// 手机端目录
+document.getElementById("menu").onclick = () => document.getElementById("nav").classList.toggle("open");
+links.forEach(a => a.addEventListener("click", () => document.getElementById("nav").classList.remove("open")));
+</script>
+</body>
+</html>

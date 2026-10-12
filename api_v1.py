@@ -535,7 +535,7 @@ api = FastAPI(
     title="参考视频检索 API", version="1.0.0",
     description=("上传产品图 → AI 拆解关键词 → 16 个渠道检索参考广告片 → AI 打分并写出参考点 → 可选下载。\n\n"
                  "鉴权：请求头 `X-API-Key: <key>`。所有耗时操作都是异步任务，返回 `task_id` 后轮询 "
-                 "`GET /tasks/{task_id}` 或通过 `callback_url` 接收回调。完整接入说明见仓库 docs/API.md。"),
+                 "`GET /tasks/{task_id}` 或通过 `callback_url` 接收回调。完整接入说明见 [接入文档](/developer)。"),
     docs_url="/docs", redoc_url="/redoc", openapi_url="/openapi.json")
 api.include_router(router)
 
