@@ -116,12 +116,15 @@ class Task(BaseModel):
     title: str
     queue_position: int = Field(description="排队中时，前面还有几个同类任务")
     progress: str = Field(description="最新一条进度说明")
+    percent: int = Field(0, description="进度百分比 0~100（检索任务；识图 0~15，检索 15~55，AI 打分 55~98）")
+    stage: str = Field("", description="当前阶段，如“多平台检索 32/70”")
     created_at: str
     started_at: str | None
     finished_at: str | None
     error: str | None
-    run_id: str | None = Field(description="检索/下载对应的结果 ID")
+    run_id: str | None = Field(description="检索/下载对应的结果 ID；检索任务开始运行后就有")
     result_url: str | None = Field(description="结果地址：GET /api/v1/runs/{run_id}")
+    partial_url: str | None = Field(None, description="检索进行中：中间结果地址 GET /api/v1/runs/{run_id}/partial")
     play_url: str | None = Field(None, description="仅 relay 任务：可直接播放的 mp4 地址")
     external_id: str | None = None
 
@@ -165,6 +168,7 @@ class Dimension(BaseModel):
     what_to_learn: str = Field(description="这个维度参考什么")
     queries_zh: list[str]
     queries_en: list[str]
+    pending: bool = Field(False, description="仅中间结果：该维度还在检索/打分")
     videos: list[Video]
 
 
@@ -240,6 +244,9 @@ def task_out(t: dict, base: str) -> dict:
         "error": t["error"], "run_id": t["run_id"],
         "result_url": _abs(base, f"/api/v1/runs/{t['run_id']}") if t["run_id"] and t["status"] == "done" else None,
         "play_url": play, "external_id": t["meta"].get("external_id"),
+        "percent": t.get("pct") or (100 if t["status"] == "done" else 0), "stage": t.get("stage") or "",
+        "partial_url": _abs(base, f"/api/v1/runs/{t['run_id']}/partial")
+        if t["kind"] == "search" and t["run_id"] and t["status"] == "running" else None,
     }
 
 
@@ -266,6 +273,7 @@ def run_out(r: dict, base: str) -> dict:
         "product": r["analysis"].get("product", {}),
         "dimensions": [{**{k: g.get(k) for k in ("key", "name", "what_to_learn")},
                         "queries_zh": g.get("queries_zh", []), "queries_en": g.get("queries_en", []),
+                        "pending": bool(g.get("pending")),
                         "videos": [video(v) for v in g["videos"]]} for g in r["groups"]],
         "reference_platforms": [{**{k: p.get(k, "") for k in ("name", "kind", "kind_name", "learn", "query")},
                                  "search_url": p["url"], "direct": "fetch" in next(
@@ -343,7 +351,8 @@ def _launch(image: Path, p: SearchCreate | RerunCreate, brief: str, pfs: tuple, 
 
     def work(progress):
         try:
-            res = pipeline.run_search(str(image), brief, pfs, progress=progress, **opts)
+            res = pipeline.run_search(str(image), brief, pfs, progress=progress,
+                                      extra={"client": who, "external_id": p.external_id}, **opts)
         finally:
             if cleanup:
                 image.unlink(missing_ok=True)
@@ -463,6 +472,34 @@ def list_tasks(request: Request, limit: int = Query(20, ge=1, le=100), who: str 
 @router.get("/runs/{run_id}", response_model=Run, tags=["结果"], summary="获取检索结果")
 def get_run(run_id: str, request: Request, who: str = Depends(client)):
     return run_out(_own_run(run_id, who), _base(request))
+
+
+class PartialRun(BaseModel):
+    complete: bool = Field(description="true 表示已检索完，请改用 GET /runs/{run_id} 取最终结果")
+    percent: int
+    stage: str
+    searched: dict = Field(description="各来源已拿到的原始结果条数")
+    run: Run | None = Field(description="中间结果；识别产品完成前为 null。打完分的维度先给出视频，"
+                                        "最终结果还会跨维度去重，条目可能略有变化")
+
+
+@router.get("/runs/{run_id}/partial", response_model=PartialRun, tags=["结果"],
+            summary="检索进行中的中间结果（可提前渲染）")
+def get_partial(run_id: str, request: Request, who: str = Depends(client)):
+    try:
+        done = pipeline.load(run_id)
+    except (FileNotFoundError, ValueError):
+        done = None
+    if done:
+        if done.get("client") != who:
+            raise ApiError(404, "not_found", "检索结果不存在")
+        return {"complete": True, "percent": 100, "stage": "完成", "searched": {}, "run": run_out(done, _base(request))}
+    r = pipeline.load_partial(run_id)
+    if not r or r.get("client") != who:
+        raise ApiError(404, "not_found", "检索结果不存在或已结束")
+    pg = r.get("progress", {})
+    return {"complete": False, "percent": pg.get("pct", 0), "stage": pg.get("stage", ""),
+            "searched": r.get("searched", {}), "run": run_out(r, _base(request)) if r.get("analysis") else None}
 
 
 @router.get("/runs", response_model=list[RunSummary], tags=["结果"], summary="历史检索（最新在前）")

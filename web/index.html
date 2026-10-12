@@ -112,6 +112,22 @@
   .rfilter .opts { margin:6px 0 0; }
   .badge.ty { top:auto; bottom:8px; }
   .v.off { display:none; }
+  /* 进度与中间态 */
+  .prog { margin-top:12px; } .prog .row { display:flex; justify-content:space-between; gap:12px; font-size:13px; margin-bottom:6px; }
+  .pbar { height:6px; border-radius:3px; background:var(--line); overflow:hidden; }
+  .pbar i { display:block; height:100%; width:0; background:var(--accent); border-radius:3px; transition:width .6s ease; }
+  .task .pbar { height:3px; margin-top:4px; }
+  .steps { display:flex; gap:6px; margin-top:8px; font-size:12px; color:var(--muted); flex-wrap:wrap; }
+  .steps span { padding:1px 8px; border-radius:10px; background:var(--bg); }
+  .steps span.on { background:var(--accent-soft); color:var(--accent); } .steps span.ok { color:var(--ok); }
+  .live { display:inline-block; font-size:12px; font-weight:500; color:var(--accent); background:var(--accent-soft);
+          padding:1px 8px; border-radius:10px; margin-left:6px; vertical-align:middle; }
+  .skel { border:1px dashed var(--line); border-radius:10px; aspect-ratio:16/12; display:flex; align-items:center;
+          justify-content:center; color:var(--muted); font-size:12px; animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.45; } }
+  @media (prefers-reduced-motion: reduce) { .skel { animation:none; } .pbar i { transition:none; } }
+  .srcchips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .srcchips span { font-size:12px; padding:1px 8px; border:1px solid var(--line); border-radius:10px; color:var(--muted); }
 </style>
 </head>
 <body>
@@ -161,6 +177,11 @@
         </div>
         <button id="go" disabled>开始检索</button>
         <div class="log" id="log"></div>
+        <div class="prog hidden" id="prog" aria-live="polite">
+          <div class="row"><span id="pstage"></span><span class="note" id="ppct"></span></div>
+          <div class="pbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="pbar"><i id="pfill"></i></div>
+          <div class="steps" id="psteps"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -269,10 +290,12 @@ function renderHistory(runs) {
       <div class="acts"><button class="ghost" data-view="${esc(r.run_id)}">查看</button>
         <button class="ghost" data-rerun="${esc(r.run_id)}" title="用上方勾选的渠道和筛选条件，以同一张产品图和简报重新检索">用当前渠道和筛选重新检索</button></div>
     </div>`).join("");
-  document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => viewRun(b.dataset.view));
+  document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => userView(b.dataset.view));
   document.querySelectorAll("[data-rerun]").forEach(b => b.onclick = () => rerun(b.dataset.rerun));
 }
 $("#histreload").onclick = loadHistory;
+
+function userView(id) { live.show = false; viewRun(id); }  // 用户主动查看别的结果：中间态不再覆盖页面
 
 async function viewRun(id, scroll = true) {
   const r = await fetch(`/runs/${encodeURIComponent(id)}/result.json`, {cache: "no-store"});
@@ -294,7 +317,8 @@ async function submitTask(promise, label) {
     const r = await promise;
     if (!r.ok) throw new Error((await r.json()).detail);
     follow = (await r.json()).job_id;
-    $("#log").textContent = `已加入任务队列：${label}。可以继续上传下一张图提交新任务。`;
+    $("#log").textContent = `已加入任务队列：${label}。结果会边检索边显示，也可以继续上传下一张图提交新任务。`;
+    watch(follow, label);
   } catch (e) { $("#log").innerHTML = `<span class="err">提交失败：${esc(e.message)}</span>`; }
   $("#go").disabled = !file;
   refreshTasks();
@@ -309,10 +333,16 @@ async function refreshTasks() {
   $("#tasks").innerHTML = list.length ? list.slice(0, 30).map(t => `
     <div class="task"><span class="st ${t.status}">${ST[t.status] || t.status}${t.status === "queued" && t.ahead ? `（前面 ${t.ahead} 个）` : ""}</span>
       <div style="min-width:0"><div>${t.kind === "download" ? "⬇ " : ""}${esc(t.title)} <span class="m">· ${esc(t.created.slice(5, 16))}</span></div>
-        <div class="m" title="${esc(t.error || t.last)}">${esc(t.status === "error" ? t.error : t.last || (t.status === "queued" ? "等待空闲…" : ""))}</div></div>
-      <div>${t.run_id && t.status === "done" ? `<button class="ghost" data-view="${esc(t.run_id)}">查看结果</button>` : ""}</div></div>`).join("")
+        <div class="m" title="${esc(t.error || t.last)}">${esc(t.status === "error" ? t.error : t.status === "running" && t.stage ? `${t.stage} · ${t.pct}%` : t.last || (t.status === "queued" ? "等待空闲…" : ""))}</div>
+        ${t.status === "running" && t.kind === "search" ? `<div class="pbar"><i style="width:${+t.pct || 0}%"></i></div>` : ""}</div>
+      <div>${t.run_id && t.status === "done" ? `<button class="ghost" data-view="${esc(t.run_id)}">查看结果</button>`
+        : t.status === "running" && t.kind === "search" && t.id !== live.id ? `<button class="ghost" data-live="${esc(t.id)}">查看进度</button>` : ""}</div></div>`).join("")
     : `<span class="note">暂无任务。提交后可以继续上传下一张图，任务在后台排队执行。</span>`;
-  $("#tasks").querySelectorAll("[data-view]").forEach(b => b.onclick = () => viewRun(b.dataset.view));
+  $("#tasks").querySelectorAll("[data-view]").forEach(b => b.onclick = () => userView(b.dataset.view));
+  $("#tasks").querySelectorAll("[data-live]").forEach(b => b.onclick = () => {
+    const t = list.find(x => x.id === b.dataset.live);
+    follow = b.dataset.live; watch(follow, t ? t.title : ""); $("#out").scrollIntoView({behavior: "smooth"});
+  });
 
   // 新完成的任务：刷新历史；正在跟踪的自动展示
   const done = list.filter(t => t.status === "done" || t.status === "error");
@@ -320,24 +350,14 @@ async function refreshTasks() {
   if (tasksInit) {
     if (fresh.some(t => t.kind === "search")) loadHistory();
     for (const t of fresh) {
-      if (t.id === follow) {
-        follow = null;
-        if (t.status === "error") $("#log").innerHTML = `<span class="err">任务失败：${esc(t.title)}：${esc(t.error)}</span>`;
-        else if (t.kind === "search" || (current && current.run_id === t.run_id)) {
-          $("#log").textContent = `已完成：${t.title}`;
-          await viewRun(t.run_id, t.kind === "search");
-        }
-      } else if (t.kind === "download" && t.status === "done" && current && current.run_id === t.run_id) {
+      if (t.id === live.id) continue;  // 正在跟踪的任务由 watch() 处理
+      if (t.kind === "download" && t.status === "done" && current && current.run_id === t.run_id) {
         await viewRun(t.run_id, false);
       }
     }
   }
   done.forEach(t => lastDone.add(t.id));
   tasksInit = true;
-  if (follow) {
-    const ft = list.find(t => t.id === follow);
-    if (ft && ft.last) $("#log").textContent = `${ft.title}：${ft.status === "queued" ? "排队中" : ft.last}`;
-  }
   taskTimer = setTimeout(refreshTasks, active.length ? 2000 : 15000);
 }
 
@@ -361,29 +381,88 @@ $("#go").onclick = () => {
   submitTask(fetch("/api/search", {method: "POST", body: fd}), $("#brief").value.trim().slice(0, 20) || file.name);
 };
 
+// ---------- 跟踪单个任务：进度条 + 中间结果提前渲染 ----------
+// live.show：是否把中间结果画到页面上（用户点开别的历史结果后为 false，只更新进度条）
+const live = {id: null, rev: -1, timer: null, show: true, shown: false, label: ""};
+const STEPS = [["识别产品", 0], ["多平台检索", 15], ["AI 评估", 55], ["完成", 100]];
+function watch(id, label) {
+  Object.assign(live, {id, rev: -1, show: true, shown: false, label});
+  pollLive();
+}
+function showProgress(t) {
+  const queued = t.status === "queued", pct = t.status === "done" ? 100 : +t.pct || 0;
+  $("#prog").classList.remove("hidden");
+  $("#pstage").textContent = `${live.label ? live.label + "：" : ""}${queued ? `排队中${t.ahead ? `，前面 ${t.ahead} 个任务` : ""}`
+    : t.status === "done" ? "已完成" : t.kind === "search" ? (t.stage || "准备中") : (t.log?.at(-1) || "进行中")}`;
+  $("#ppct").textContent = t.kind === "search" && !queued ? pct + "%" : "";
+  $("#pfill").style.width = (t.kind === "search" || t.status === "done" ? pct : queued ? 0 : 50) + "%";
+  $("#pbar").setAttribute("aria-valuenow", pct);
+  $("#psteps").innerHTML = t.kind !== "search" ? "" : STEPS.map(([name, at], i) => {
+    const next = STEPS[i + 1] ? STEPS[i + 1][1] : 101;
+    const cls = queued ? "" : pct >= next || t.status === "done" ? "ok" : pct >= at ? "on" : "";
+    return `<span class="${cls}">${cls === "ok" ? "✓ " : ""}${name}</span>`;
+  }).join("");
+}
+async function pollLive() {
+  clearTimeout(live.timer);
+  const id = live.id;
+  if (!id) return;
+  let t;
+  try { t = await (await fetch(`/api/tasks/${id}`, {cache: "no-store"})).json(); }
+  catch (e) { live.timer = setTimeout(pollLive, 3000); return; }
+  if (id !== live.id) return;  // 期间换了跟踪对象
+  showProgress(t);
+  const p = t.partial;
+  if (live.show && p && p.analysis && p.progress.rev !== live.rev) {
+    live.rev = p.progress.rev;
+    render(p);
+    if (!live.shown) { live.shown = true; $("#out").scrollIntoView({behavior: "smooth"}); }
+  }
+  if (t.status === "done" || t.status === "error") {
+    live.id = null;
+    if (t.status === "error") $("#log").innerHTML = `<span class="err">任务失败：${esc(t.title)}：${esc(t.error)}</span>`;
+    else {
+      $("#log").textContent = `已完成：${t.title}`;
+      if (t.kind === "search" && live.show) await viewRun(t.run_id, !live.shown);
+      else if (t.kind === "download" && current && current.run_id === t.run_id) await viewRun(t.run_id, false);
+    }
+    setTimeout(() => { if (!live.id) $("#prog").classList.add("hidden"); }, 4000);
+    refreshTasks();
+    return;
+  }
+  live.timer = setTimeout(pollLive, t.status === "queued" ? 3000 : 1500);
+}
+
 const fmtDur = s => s ? `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}` : "-";
 const fmtViews = n => n == null ? "-" : n >= 1e4 ? (n/1e4).toFixed(1) + "万" : n;
 
 function render(res) {
-  current = res;
+  const isLive = !!res.progress;  // 中间结果：没有下载、筛选栏和参考平台抓取
+  current = isLive ? null : res;
   const p = res.analysis.product, s = res.stats;
   const dl = Object.fromEntries((res.downloads || []).map(d => [d.url, d]));
-  let h = `<div class="card"><h3 style="margin-top:0">产品画像 <span class="note">· ${esc(res.created || "")}${res.brief ? " · " + esc(res.brief) : ""}</span></h3><div class="profile">
+  let h = `<div class="card"><h3 style="margin-top:0">产品画像${isLive ? `<span class="live">检索中 ${res.progress.pct}%</span>` : ""} <span class="note">· ${esc(res.created || "")}${res.brief ? " · " + esc(res.brief) : ""}</span></h3><div class="profile">
     <div><b>品牌</b>${esc(p.brand)}</div><div><b>产品</b>${esc(p.name)}</div>
     <div><b>品类</b>${esc(p.category)}</div><div><b>调性</b>${esc(p.tone)}</div>
     <div><b>人群</b>${esc(p.target_audience)}</div><div><b>竞品</b>${esc((p.competitors||[]).join("、"))}</div>
     <div style="grid-column:1/-1"><b>卖点</b>${esc((p.selling_points||[]).join("、"))}</div></div>
+    ${isLive ? `<p class="note">${esc(res.progress.stage)} · 已拿到原始结果 ${s.raw} 条 · 已出结果 ${s.kept} 条 · ${Math.round(s.seconds)}s
+      · 打完分的维度先显示，全部完成后会再跨维度去重，条目可能略有变化</p>
+      <div class="srcchips">${Object.entries(res.searched || {}).sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `<span>${esc(k)} ${n}</span>`).join("")}</div></div>` : `
     <p class="note">检索 ${s.queries} 次 · 原始 ${s.raw} 条 · 保留 ${s.kept} 条 · ${s.seconds}s ·
     来源分布：${esc(Object.entries(res.groups.flatMap(g => g.videos).reduce((m, v) => (m[v.platform] = (m[v.platform] || 0) + 1, m), {})).map(([k, n]) => k + " " + n).join("、"))} ·
     <a href="/runs/${esc(res.run_id)}/report.md" target="_blank">Markdown 报告</a> ·
     参考点由 AI 依据标题推断，请看片核实</p>
-    ${filterNote(res)}</div>`;
-  h += resultFilterBar(res);
+    ${filterNote(res)}</div>`}`;
+  if (!isLive) h += resultFilterBar(res);
   for (const g of res.groups) {
-    h += `<div class="card dim"><h3>${esc(g.name)} <span class="note" data-cnt></span></h3>
+    h += `<div class="card dim"><h3>${esc(g.name)} <span class="note" data-cnt></span>${g.pending ? `<span class="live">${
+      res.progress.pct < 55 ? "检索中" : "AI 评估中"}</span>` : ""}</h3>
       <div class="learn"><b>参考什么：</b>${esc(g.what_to_learn)}</div>
       <div class="kw">关键词：${esc([...g.queries_zh, ...g.queries_en].join(" / "))}</div>`;
-    if (!g.videos.length) h += `<p class="note">未找到达标结果，可调整关键词或去下方参考平台手动搜索。</p>`;
+    if (g.pending) h += `<div class="grid">${"<div class=skel>等待结果…</div>".repeat(4)}</div>`;
+    else if (!g.videos.length) h += `<p class="note">未找到达标结果，可调整关键词或去下方参考平台手动搜索。</p>`;
     h += `<div class="grid">`;
     for (const v of g.videos) {
       const d = dl[v.url];
@@ -398,29 +477,29 @@ function render(res) {
         <div class="vb"><a class="vt" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${pa}>${esc(v.title)}</a>
           <div class="meta">${esc(v.channel)} · 播放 ${fmtViews(v.views)}${v.published ? " · " + esc(v.published) : ""}</div>
           ${v.reference ? `<div class="ref">${esc(v.reference)}</div>` : ""}
-          <div class="pick"><label><input type="checkbox" class="sel" value="${esc(v.url)}"> 选择下载</label>
+          <div class="pick">${isLive ? `<span></span>` : `<label><input type="checkbox" class="sel" value="${esc(v.url)}"> 选择下载</label>`}
             <span class="dl">${d ? (d.ok ? `<a href="/runs/${esc(res.run_id)}/${encodeURI(d.file)}" target="_blank">已下载 ${d.size_mb}MB</a>`
                                       : `<span class="err" title="${esc(d.error)}">${d.error && d.error.includes("抖音") ? "抖音需配置 cookies" : "下载失败"}</span>`) : ""}</span></div>
         </div></div>`;
     }
     h += `</div></div>`;
   }
-  h += `<div class="card"><h3 style="margin-top:0">参考平台</h3>
+  if (!isLive) h += `<div class="card"><h3 style="margin-top:0">参考平台</h3>
     <p class="note" style="margin-top:0">能抓取的平台直接列出作品，点击即在本页播放；需要登录的平台只能打开它的搜索页。</p>`;
   for (const pl of res.platform_links) pl.direct ??= DIRECT.has(pl.name);  // 兼容旧记录
-  res.platform_links.forEach((pl, i) => {
+  if (!isLive) res.platform_links.forEach((pl, i) => {
     h += `<div class="pfrow"><div class="h"><b>${esc(pl.name)}</b><span class="note">${esc(pl.kind_name)} · ${esc(pl.learn)}</span>
       <a class="note" href="${esc(safeUrl(pl.url))}" target="_blank" rel="noopener">${pl.direct ? "更多结果" : "需登录，打开搜索页"}：${esc(pl.query || "打开")} ↗</a></div>
       ${pl.direct ? `<div class="strip" id="pf${i}"><span class="note">正在抓取…</span></div>` : ""}</div>`;
   });
-  h += `</div>`;
+  if (!isLive) h += `</div>`;
   if (res.errors?.length) h += `<div class="card"><b>检索异常</b><ul>${res.errors.map(e => `<li class="note">${esc(e)}</li>`).join("")}</ul></div>`;
   $("#out").innerHTML = h;
   bindResultFilter();
-  $("#bar").classList.toggle("hidden", s.kept === 0);
+  $("#bar").classList.toggle("hidden", isLive || s.kept === 0);
   document.querySelectorAll(".sel").forEach(c => c.onchange = updSel);
   updSel();
-  res.platform_links.forEach((pl, i) => pl.direct && loadPlatform(pl, $("#pf" + i)));
+  if (!isLive) res.platform_links.forEach((pl, i) => pl.direct && loadPlatform(pl, $("#pf" + i)));
 }
 
 // ---------- 结果筛选（检索后，在已返回的结果里即时过滤，不重新检索） ----------

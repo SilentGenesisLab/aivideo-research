@@ -59,7 +59,7 @@ def submit(kind: str, title: str, fn, meta: dict | None = None, on_finish=None) 
     on_finish(task) 在任务结束（成功或失败）后调用，用于 Webhook 通知。"""
     tid = uuid.uuid4().hex[:12]
     t = {"id": tid, "kind": kind, "title": title, "status": "queued", "created": _now(), "seq": time.time_ns(),
-         "started": None, "finished": None, "log": [], "error": None, "run_id": None,
+         "started": None, "finished": None, "log": [], "error": None, "run_id": None, "pct": 0, "stage": "",
          "result": None, "meta": meta or {}}
     with _lock:
         _tasks[tid] = t
@@ -70,6 +70,22 @@ def submit(kind: str, title: str, fn, meta: dict | None = None, on_finish=None) 
         del t["log"][:-60]
         _save(t)
 
+    last_save = [0.0]
+
+    def update(pct: float | None = None, stage: str | None = None, run_id: str | None = None):
+        """中间态：进度百分比、当前阶段、提前确定的 run_id。高频调用，最多每秒落盘一次。"""
+        if pct is not None:
+            t["pct"] = max(t.get("pct") or 0, min(99, round(pct)))
+        if stage is not None:
+            t["stage"] = stage
+        if run_id is not None:
+            t["run_id"] = run_id
+        if time.time() - last_save[0] > 1 or run_id is not None:
+            last_save[0] = time.time()
+            _save(t)
+
+    progress.update = update  # 支持中间态的任务（检索）通过 getattr(progress, "update") 使用
+
     def run():
         t.update(status="running", started=_now())
         _save(t)
@@ -78,7 +94,7 @@ def submit(kind: str, title: str, fn, meta: dict | None = None, on_finish=None) 
             t["run_id"] = res.get("run_id") or t["meta"].get("run_id")
             if kind == "relay":
                 t["result"] = res
-            t["status"] = "done"
+            t["status"], t["pct"], t["stage"] = "done", 100, "完成"
         except Exception as e:
             t["error"], t["status"] = str(e)[:500], "error"
         t["finished"] = _now()

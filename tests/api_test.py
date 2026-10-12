@@ -133,9 +133,27 @@ def online(image):
         lst = requests.get(f"{base}/api/v1/tasks", headers=h).json()
         check("任务列表只含本站点任务", lst and all(x["task_id"] != up["task_id"] for x in lst))
 
+        partial = None  # 运行中：进度百分比 + 中间结果
+        for _ in range(240):
+            tk = requests.get(f"{base}/api/v1/tasks/{created['task_id']}", headers=h).json()
+            if tk["status"] in ("succeeded", "failed"):
+                break
+            if tk["partial_url"]:
+                pr = requests.get(tk["partial_url"], headers=h).json()
+                if pr.get("run") and pr["percent"] >= 15:
+                    partial = (tk, pr)
+                    break
+            time.sleep(1)
+        check("运行中返回进度百分比和中间结果", partial and 0 < partial[0]["percent"] < 100 and partial[1]["complete"] is False
+              and partial[1]["run"]["dimensions"] and partial[1]["run"]["product"].get("category"),
+              partial and {"percent": partial[0]["percent"], "stage": partial[0]["stage"]})
+        if partial:
+            check("别的站点读不到中间结果",
+                  requests.get(partial[0]["partial_url"], headers=h2).status_code == 404)
         t = wait(base, h, created["task_id"])
         print(f"     用时 {time.time() - t0:.0f}s，状态 {t['status']}")
         check("任务成功", t["status"] == "succeeded", t.get("error"))
+        check("完成后进度 100 且不再给中间结果地址", t["percent"] == 100 and t["partial_url"] is None, t)
         check("任务带回 external_id 和结果地址", t["external_id"] == "order-123" and t["result_url"], t)
         run = requests.get(t["result_url"], headers=h).json()
         check("结果结构完整", {"product", "dimensions", "reference_platforms", "product_image_url"} <= set(run)

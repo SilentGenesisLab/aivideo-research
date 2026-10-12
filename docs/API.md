@@ -142,6 +142,7 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | GET | `/api/v1/tasks/{task_id}` | 查询任务 |
 | GET | `/api/v1/tasks?limit=20` | 最近的任务 |
 | GET | `/api/v1/runs/{run_id}` | 获取检索结果 |
+| GET | `/api/v1/runs/{run_id}/partial` | 检索进行中的中间结果（可提前渲染） |
 | GET | `/api/v1/runs?limit=20` | 历史检索 |
 | POST | `/api/v1/runs/{run_id}/rerun` | 用同一张图重新检索（可换渠道/简报） |
 | POST | `/api/v1/runs/{run_id}/downloads` | 下载结果中的视频 |
@@ -246,19 +247,23 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
   "title": "30秒TVC，年轻白领，强调零糖",
   "queue_position": 0,
   "progress": "③ AI 评估相关性并标注参考点…",
+  "percent": 72,
+  "stage": "AI 评估 6/11 批",
   "created_at": "2026-10-12 07:47:44",
   "started_at": "2026-10-12 07:47:44",
   "finished_at": null,
   "error": null,
-  "run_id": null,
+  "run_id": "20261012-074744",
   "result_url": null,
+  "partial_url": "https://<服务地址>/api/v1/runs/20261012-074744/partial",
   "play_url": null,
   "external_id": "project-123"
 }
 ```
 
 - `type`：`search` 检索 / `download` 下载 / `relay` 中转播放
-- 成功后 `run_id`、`result_url` 有值；`relay` 任务成功后 `play_url` 有值。
+- `percent`：检索任务的进度 0~100。识别产品 0~15，多平台检索 15~55（按完成的检索次数），AI 打分 55~98（按完成的打分批次），完成为 100。`stage` 是当前阶段的文字说明，可直接显示在进度条旁。
+- 检索任务开始运行后 `run_id` 就有值；运行中 `partial_url` 指向中间结果（见 [5.5.1](#551-get-runsrun_idpartial中间结果)），成功后 `result_url` 有值。`relay` 任务成功后 `play_url` 有值。
 
 ### 5.5 GET /runs/{run_id}（结果）
 
@@ -342,6 +347,38 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
 - `videos[].embed_url` 为 `null` 表示该站不能直接内嵌，见 [第 6 节](#6-在你的页面里播放视频)。
 - `videos[].download` 为 `null` 表示没下载过。
 - `errors`：个别渠道检索失败的说明，不影响其他结果。
+
+### 5.5.1 GET /runs/{run_id}/partial（中间结果）
+
+检索要 1~4 分钟。不想等到全部完成才显示，可以在任务运行中轮询这个接口（建议 2 秒一次），先把已有的内容渲染出来：
+
+| 阶段 | 大约在 | 能拿到的内容 |
+|---|---|---|
+| 识别产品 | 0~15% | `run` 为 `null` |
+| 多平台检索 | 15~55% | 产品画像、各维度“参考什么”和关键词；`searched` 为各来源已拿到的条数 |
+| AI 打分 | 55~98% | 每打完一个维度，该维度的视频就出现；还没打完的维度 `pending: true`、`videos` 为空 |
+
+```json
+{
+  "complete": false,
+  "percent": 72,
+  "stage": "AI 评估 6/11 批",
+  "searched": {"YouTube": 160, "B 站": 80, "抖音": 15},
+  "run": {
+    "run_id": "20261012-074744",
+    "product": {"brand": "Schweppes（怡泉）", "category": "零糖气泡水", "...": "..."},
+    "dimensions": [
+      {"key": "category", "name": "同品类", "pending": true, "videos": [], "...": "..."},
+      {"key": "competitor", "name": "竞品", "pending": false, "videos": [{"title": "Perrier - Go For The ...", "score": 9, "...": "..."}]}
+    ],
+    "stats": {"queries": 40, "raw": 255, "kept": 10, "seconds": 42.0},
+    "...": "结构同 5.5"
+  }
+}
+```
+
+- `run` 的结构与 5.5 相同，多了 `dimensions[].pending`。中间结果里没有下载信息，参考平台也只有链接。
+- 全部完成后还会跨维度去重，所以最终条目可能和中间结果略有不同。任务成功后请以 `GET /runs/{run_id}` 为准；这时再调本接口会返回 `complete: true` 和最终结果。
 
 ### 5.6 POST /runs/{run_id}/rerun
 

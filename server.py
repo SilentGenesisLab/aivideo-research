@@ -378,6 +378,8 @@ def job(jid: str):
     if not t:
         raise HTTPException(404, "任务不存在")
     out = {**t, "ahead": tasks.position(t)}
+    if t["status"] == "running" and t["kind"] == "search" and t["run_id"]:
+        out["partial"] = pipeline.load_partial(t["run_id"])
     if t["status"] == "done" and t["kind"] != "relay" and t["run_id"]:
         try:
             out["result"] = pipeline.load(t["run_id"])

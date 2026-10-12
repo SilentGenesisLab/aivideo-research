@@ -58,13 +58,22 @@ def _rank_batch(product: str, dim: dict, batch: list[dict], hint: str) -> None:
         v["vtype"] = t if t in filters.TYPE_NAMES else filters.guess_type(v)
 
 
-def rank_dimension(analysis: dict, dim: dict, videos: list[dict], batch_size: int = 25, hint: str = "") -> list[dict]:
+def _batch(product, dim, batch, hint, on_batch):
+    try:
+        _rank_batch(product, dim, batch, hint)
+    finally:
+        if on_batch:
+            on_batch()
+
+
+def rank_dimension(analysis: dict, dim: dict, videos: list[dict], batch_size: int = 25, hint: str = "",
+                   on_batch=None) -> list[dict]:
     p = analysis.get("product", {})
     product = (f"{p.get('brand','')} {p.get('name','')}（{p.get('category','')}）"
                f"卖点：{'、'.join(p.get('selling_points', []))}；调性：{p.get('tone','')}")
     batches = [videos[i:i + batch_size] for i in range(0, len(videos), batch_size)]
     with ThreadPoolExecutor(max_workers=4) as ex:
-        list(ex.map(lambda b: _rank_batch(product, dim, b, hint), batches))
+        list(ex.map(lambda b: _batch(product, dim, b, hint, on_batch), batches))
     for v in videos:
         v.setdefault("score", 0)
         v.setdefault("reference", "")
