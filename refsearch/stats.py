@@ -6,7 +6,7 @@ import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
-from . import config, tasks
+from . import config, filters, tasks
 
 DB = config.RUNS_DIR / "_stats.sqlite3"
 KEEP_DAYS = 90
@@ -116,6 +116,9 @@ def _load_index():
                     "dim": g.get("key", ""), "dim_name": g.get("name", ""),
                     **{k: v.get(k) for k in ("platform", "url", "title", "channel", "duration", "views",
                                              "thumbnail", "score", "is_ad", "reference")},
+                    # 加类型识别之前的旧结果没有 vtype，按标题关键词粗分
+                    "vtype": (vt := v.get("vtype") or filters.guess_type(v)), "vtype_name": filters.TYPE_NAMES[vt],
+                    "vtype_guessed": not v.get("vtype"),
                     "local": f"/runs/{r['run_id']}/{d['file']}" if d and d.get("ok") else ""})
                 run["kept"] += 1
         runs.append(run)
@@ -125,18 +128,23 @@ def _load_index():
 
 def search_videos(q: str = "", platform: str = "", dim: str = "", min_score: float = 0, client: str = "",
                   downloaded: bool = False, dedupe: bool = True, sort: str = "score",
-                  limit: int = 60, offset: int = 0) -> dict:
+                  limit: int = 60, offset: int = 0, vtype: str = "", ad_only: bool = False,
+                  exclude: str = "") -> dict:
     vids = _load_index()["videos"]
     words = [w.lower() for w in q.split() if w]
+    bad = [w.lower() for w in exclude.split() if w]
+    types = set(vtype.split(",")) - {""}
 
     def hit(v):
         if platform and v["platform"] != platform or dim and v["dim"] != dim or client and v["client"] != client:
             return False
-        if (v["score"] or 0) < min_score or downloaded and not v["local"]:
+        if (v["score"] or 0) < min_score or downloaded and not v["local"] or ad_only and not v["is_ad"]:
+            return False
+        if types and v["vtype"] not in types:
             return False
         text = " ".join(str(v[k] or "") for k in ("title", "reference", "channel", "product", "brand",
                                                     "category", "platform")).lower()
-        return all(w in text for w in words)
+        return all(w in text for w in words) and not any(w in text for w in bad)
 
     found = [v for v in vids if hit(v)]
     if dedupe:  # 同一视频出现在多次检索里时只保留一条（优先已下载、分数高的）
@@ -150,8 +158,10 @@ def search_videos(q: str = "", platform: str = "", dim: str = "", min_score: flo
            "views": lambda v: v["views"] or 0}.get(sort, lambda v: v["score"] or 0)
     found.sort(key=key, reverse=True)
     facets = Counter(v["platform"] for v in found)
+    type_facets = Counter(v["vtype"] for v in found)
     return {"total": len(found), "items": found[offset:offset + limit],
-            "platforms": facets.most_common(), "all_platforms": sorted({v["platform"] for v in vids}),
+            "platforms": facets.most_common(),
+            "types": [[k, filters.TYPE_NAMES[k], type_facets[k]] for k in filters.TYPE_NAMES if type_facets[k]], "all_platforms": sorted({v["platform"] for v in vids}),
             "clients": sorted({v["client"] for v in vids})}
 
 
@@ -199,6 +209,7 @@ def overview(days: int = 30) -> dict:
         "by_client": by_client.most_common(),
         "by_platform": Counter(v["platform"] for v in uniq.values()).most_common(20),
         "by_dimension": Counter(v["dim_name"] for v in vids).most_common(),
+        "by_type": Counter(v["vtype_name"] for v in uniq.values()).most_common(),
         "by_category": Counter((r["category"] or "未识别").split("／")[0].split("/")[0].strip()[:16]
                                for r in runs).most_common(10),
         "score_hist": [{"score": s, "count": sum(1 for v in uniq.values() if round(v["score"] or 0) == s)}

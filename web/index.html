@@ -94,6 +94,24 @@
   .it .thumb { aspect-ratio:16/10; }
   .it .tt { font-size:12px; padding:6px 8px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
   .it:hover { border-color:var(--accent); }
+  /* 类型与筛选 */
+  .sect { margin:14px 0 4px; padding-top:12px; border-top:1px solid var(--line); }
+  .sect > .note { display:block; margin-bottom:8px; }
+  .types { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+  .tchip { border:1px solid var(--line); border-radius:14px; padding:3px 11px; font-size:13px; cursor:pointer;
+           background:var(--card); color:var(--text); user-select:none; }
+  .tchip.on { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
+  .tchip:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .tchip small { color:var(--muted); margin-left:4px; }
+  .frow { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px 16px; margin-bottom:10px; }
+  .frow label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+  input[type=text] { padding:6px 8px; border-radius:6px; border:1px solid var(--line); background:var(--bg);
+                     color:var(--text); font:inherit; font-size:13px; }
+  .rfilter { position:sticky; top:0; z-index:5; }
+  .rfilter .types { margin-bottom:6px; }
+  .rfilter .opts { margin:6px 0 0; }
+  .badge.ty { top:auto; bottom:8px; }
+  .v.off { display:none; }
 </style>
 </head>
 <body>
@@ -111,9 +129,26 @@
         <div style="margin:10px 0 4px"><span class="note">检索渠道（<span id="srccount">0</span> 个）　</span>
           <button class="linkbtn" id="srcall">全选</button> · <button class="linkbtn" id="srcnone">全不选</button></div>
         <div id="sources"><span class="note">加载中…</span></div>
+        <div class="sect">
+          <span class="note">视频类型（不选则不限；选了会额外按“品类词 + 类型词”定向检索，AI 也会给每条结果判断类型）</span>
+          <div class="types" id="ftypes"><span class="note">加载中…</span></div>
+          <div class="opts" style="margin-top:0">
+            <label><input type="radio" name="tmode" value="prefer" checked> 优先这些类型</label>
+            <label><input type="radio" name="tmode" value="only"> 只要这些类型</label>
+            <label><input type="checkbox" id="adonly"> 只要广告正片</label>
+          </div>
+          <div class="frow">
+            <label>附加检索词（空格分隔，会和品类词组合检索）<input type="text" id="fkw" placeholder="如：开学季 宿舍 vlog"></label>
+            <label>结果必须包含（任一词，留空不限）<input type="text" id="fmust" placeholder="如：广告 TVC 品牌"></label>
+            <label>排除词（标题/频道/简介含任一即丢弃）<input type="text" id="fex" placeholder="如：合集 教程 解说"></label>
+          </div>
+        </div>
         <div class="opts">
           <label>每词取 <input type="number" id="perq" value="8" min="3" max="20"> 条</label>
-          <label>时长 ≤ <input type="number" id="maxdur" value="300" min="15" max="3600"> 秒</label>
+          <label>时长 <input type="number" id="mindur" value="0" min="0" max="3600" style="width:64px"> ~
+            <input type="number" id="maxdur" value="300" min="15" max="3600" style="width:72px"> 秒</label>
+          <label>AI 评分 ≥ <select id="minscore"><option>3</option><option>4</option><option selected>5</option>
+            <option>6</option><option>7</option><option>8</option></select></label>
         </div>
         <div class="opts">
           <label>检索后
@@ -168,6 +203,45 @@ function setFile(f) {
   $("#go").disabled = false;
 }
 
+// ---------- 类型与筛选（检索前） ----------
+let TYPES = [];
+const words = s => s.split(/[\s,，;；]+/).filter(Boolean);
+function formFilters() {
+  return {types: [...document.querySelectorAll("#ftypes .tchip.on")].map(c => c.dataset.k),
+          type_mode: document.querySelector("[name=tmode]:checked").value, ad_only: $("#adonly").checked,
+          keywords: words($("#fkw").value), must: words($("#fmust").value), exclude: words($("#fex").value),
+          min_duration: +$("#mindur").value || 0, max_duration: +$("#maxdur").value || 0};
+}
+// 记住上次的筛选（只存在本浏览器，读写失败就用默认值）
+const FORM_KEY = "rvs.filters.v1";
+function saveForm() {
+  try { localStorage.setItem(FORM_KEY, JSON.stringify({...formFilters(), min_score: $("#minscore").value})); } catch (e) {}
+}
+function restoreForm() {
+  let f = null;
+  try { f = JSON.parse(localStorage.getItem(FORM_KEY)); } catch (e) {}
+  f = f || {exclude: ["合集", "教程", "解说", "盘点", "reaction", "compilation", "tutorial"]};
+  document.querySelectorAll("#ftypes .tchip").forEach(c => setChip(c, (f.types || []).includes(c.dataset.k)));
+  document.querySelector(`[name=tmode][value=${f.type_mode === "only" ? "only" : "prefer"}]`).checked = true;
+  $("#adonly").checked = !!f.ad_only;
+  $("#fkw").value = (f.keywords || []).join(" "); $("#fmust").value = (f.must || []).join(" ");
+  $("#fex").value = (f.exclude || []).join(" ");
+  if (f.min_duration != null) $("#mindur").value = f.min_duration;
+  if (f.max_duration) $("#maxdur").value = f.max_duration;
+  if (f.min_score) $("#minscore").value = f.min_score;
+}
+function setChip(c, on) { c.classList.toggle("on", on); c.setAttribute("aria-pressed", on); }
+function renderTypes(list) {
+  TYPES = list;
+  $("#ftypes").innerHTML = list.map(t => `<span class="tchip" role="button" tabindex="0" aria-pressed="false"
+    data-k="${esc(t.key)}" title="${esc(t.desc)}">${esc(t.name)}</span>`).join("");
+  $("#ftypes").querySelectorAll(".tchip").forEach(c => {
+    c.onclick = () => setChip(c, !c.classList.contains("on"));
+    c.onkeydown = e => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); c.click(); } };
+  });
+  restoreForm();
+}
+
 const checkedSources = () => [...document.querySelectorAll(".pf:checked")].map(c => c.value);
 function updSrcCount() { $("#srccount").textContent = checkedSources().length; }
 
@@ -191,9 +265,9 @@ function renderHistory(runs) {
     <div class="hrow ${current && current.run_id === r.run_id ? "on" : ""}">
       <img src="${esc(r.thumb || r.image)}" alt="" loading="lazy" decoding="async">
       <div><div class="t">${esc(r.product || "未识别")}${r.brief ? ` <span class="m">· ${esc(r.brief.slice(0, 40))}</span>` : ""}</div>
-        <div class="m">${esc(r.created)} · ${r.kept} 条参考片 · ${r.platforms.length} 个来源（${esc(r.platforms.join("、"))}）${r.downloads ? ` · 已下载 ${r.downloads}` : ""}</div></div>
+        <div class="m">${esc(r.created)}${r.filters ? ` · <span title="${esc(r.filters)}">筛选：${esc(r.filters.slice(0, 30))}</span>` : ""} · ${r.kept} 条参考片 · ${r.platforms.length} 个来源（${esc(r.platforms.join("、"))}）${r.downloads ? ` · 已下载 ${r.downloads}` : ""}</div></div>
       <div class="acts"><button class="ghost" data-view="${esc(r.run_id)}">查看</button>
-        <button class="ghost" data-rerun="${esc(r.run_id)}" title="用上方勾选的渠道，以同一张产品图和简报重新检索">用当前渠道重新检索</button></div>
+        <button class="ghost" data-rerun="${esc(r.run_id)}" title="用上方勾选的渠道和筛选条件，以同一张产品图和简报重新检索">用当前渠道和筛选重新检索</button></div>
     </div>`).join("");
   document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => viewRun(b.dataset.view));
   document.querySelectorAll("[data-rerun]").forEach(b => b.onclick = () => rerun(b.dataset.rerun));
@@ -271,7 +345,7 @@ function rerun(id) {
   const pfs = checkedSources();
   if (!pfs.length) return alert("请至少勾选一个检索渠道");
   submitTask(fetch("/api/rerun", {method: "POST", headers: {"Content-Type": "application/json"},
-                                  body: JSON.stringify({run_id: id, platforms: pfs})}), "重新检索");
+                                  body: JSON.stringify({run_id: id, platforms: pfs, filters: formFilters()})}), "重新检索");
 }
 
 $("#go").onclick = () => {
@@ -281,6 +355,8 @@ $("#go").onclick = () => {
   fd.append("image", file); fd.append("brief", $("#brief").value);
   fd.append("platforms", pfs.join(","));
   fd.append("per_query", $("#perq").value); fd.append("max_duration", $("#maxdur").value);
+  fd.append("min_score", $("#minscore").value); fd.append("filters", JSON.stringify(formFilters()));
+  saveForm();
   fd.append("download_mode", $("#dlmode").value); fd.append("download_top", $("#dltop").value);
   submitTask(fetch("/api/search", {method: "POST", body: fd}), $("#brief").value.trim().slice(0, 20) || file.name);
 };
@@ -300,9 +376,11 @@ function render(res) {
     <p class="note">检索 ${s.queries} 次 · 原始 ${s.raw} 条 · 保留 ${s.kept} 条 · ${s.seconds}s ·
     来源分布：${esc(Object.entries(res.groups.flatMap(g => g.videos).reduce((m, v) => (m[v.platform] = (m[v.platform] || 0) + 1, m), {})).map(([k, n]) => k + " " + n).join("、"))} ·
     <a href="/runs/${esc(res.run_id)}/report.md" target="_blank">Markdown 报告</a> ·
-    参考点由 AI 依据标题推断，请看片核实</p></div>`;
+    参考点由 AI 依据标题推断，请看片核实</p>
+    ${filterNote(res)}</div>`;
+  h += resultFilterBar(res);
   for (const g of res.groups) {
-    h += `<div class="card dim"><h3>${esc(g.name)}</h3>
+    h += `<div class="card dim"><h3>${esc(g.name)} <span class="note" data-cnt></span></h3>
       <div class="learn"><b>参考什么：</b>${esc(g.what_to_learn)}</div>
       <div class="kw">关键词：${esc([...g.queries_zh, ...g.queries_en].join(" / "))}</div>`;
     if (!g.videos.length) h += `<p class="note">未找到达标结果，可调整关键词或去下方参考平台手动搜索。</p>`;
@@ -311,10 +389,12 @@ function render(res) {
       const d = dl[v.url];
       const local = d && d.ok ? `/runs/${res.run_id}/${encodeURI(d.file)}` : "";
       const pa = playAttrs(v.url, v.title, v.platform, local);
-      h += `<div class="v"><a class="thumb" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${pa}>
+      const text = [v.title, v.channel, v.reference, v.description].join(" ").toLowerCase();
+      h += `<div class="v" data-vt="${esc(v.vtype || "none")}" data-pf="${esc(v.platform)}" data-score="${+v.score || 0}"
+          data-ad="${v.is_ad ? 1 : 0}" data-text="${esc(text)}"><a class="thumb" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${pa}>
           <img src="${esc(thumbUrl(v.thumbnail, 480))}" loading="lazy" decoding="async" alt=""><span class="play">▶</span>
           <span class="badge">${esc(v.platform)} · ${fmtDur(v.duration)}</span>
-          <span class="badge score">${esc(v.score)}分</span></a>
+          <span class="badge score">${esc(v.score)}分</span>${v.vtype ? `<span class="badge ty">${esc(typeName(v.vtype))}</span>` : ""}</a>
         <div class="vb"><a class="vt" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${pa}>${esc(v.title)}</a>
           <div class="meta">${esc(v.channel)} · 播放 ${fmtViews(v.views)}${v.published ? " · " + esc(v.published) : ""}</div>
           ${v.reference ? `<div class="ref">${esc(v.reference)}</div>` : ""}
@@ -336,10 +416,86 @@ function render(res) {
   h += `</div>`;
   if (res.errors?.length) h += `<div class="card"><b>检索异常</b><ul>${res.errors.map(e => `<li class="note">${esc(e)}</li>`).join("")}</ul></div>`;
   $("#out").innerHTML = h;
+  bindResultFilter();
   $("#bar").classList.toggle("hidden", s.kept === 0);
   document.querySelectorAll(".sel").forEach(c => c.onchange = updSel);
   updSel();
   res.platform_links.forEach((pl, i) => pl.direct && loadPlatform(pl, $("#pf" + i)));
+}
+
+// ---------- 结果筛选（检索后，在已返回的结果里即时过滤，不重新检索） ----------
+const typeName = k => (TYPES.find(t => t.key === k) || {}).name || (k === "other" ? "其他" : k === "none" ? "未分类" : k);
+const REASONS = {duration: "时长不符", exclude: "含排除词", must: "不含必含词", type: "类型不符", ad: "非广告正片", score: "评分过低"};
+function filterNote(res) {
+  const f = res.filters, fl = res.stats.filtered || {};
+  if (!f) return "";
+  const parts = [];
+  if (f.types?.length) parts.push((f.type_mode === "only" ? "只要" : "优先") + f.types.map(typeName).join("、"));
+  if (f.keywords?.length) parts.push("附加词 " + f.keywords.join(" "));
+  if (f.must?.length) parts.push("必含 " + f.must.join(" / "));
+  if (f.exclude?.length) parts.push("排除 " + f.exclude.join(" "));
+  if (f.ad_only) parts.push("只要广告正片");
+  const drop = Object.entries(fl).filter(([, n]) => n).map(([k, n]) => `${REASONS[k] || k} ${n}`);
+  return parts.length || drop.length ? `<p class="note" style="margin:0">检索时筛选：${esc(parts.join("；") || "无")}${
+    drop.length ? ` · 已筛掉：${esc(drop.join("、"))}` : ""}</p>` : "";
+}
+function resultFilterBar(res) {
+  const vids = res.groups.flatMap(g => g.videos);
+  if (!vids.length) return "";
+  const count = key => vids.reduce((m, v) => (m[v[key] || "none"] = (m[v[key] || "none"] || 0) + 1, m), {});
+  const types = count("vtype"), pfs = count("platform");
+  const chip = (attr, k, label, n) => `<span class="tchip" role="button" tabindex="0" aria-pressed="false" ${attr}="${esc(k)}">${esc(label)}<small>${n}</small></span>`;
+  return `<div class="card rfilter" id="rfilter">
+    <div class="types"><span class="note" style="align-self:center;min-width:56px">类型</span>${Object.entries(types)
+      .sort((a, b) => b[1] - a[1]).map(([k, n]) => chip("data-ft", k, typeName(k), n)).join("")}</div>
+    <div class="types"><span class="note" style="align-self:center;min-width:56px">来源</span>${Object.entries(pfs)
+      .sort((a, b) => b[1] - a[1]).map(([k, n]) => chip("data-fp", k, k, n)).join("")}</div>
+    <div class="opts">
+      <label>评分 ≥ <select id="rscore"><option value="0">不限</option><option>6</option><option>7</option><option>8</option><option>9</option></select></label>
+      <label><input type="checkbox" id="rad"> 只看广告正片</label>
+      <input type="text" id="rq" placeholder="在结果里搜：标题/频道/参考点" style="min-width:200px">
+      <input type="text" id="rex" placeholder="排除词" style="width:120px">
+      <span class="note" id="rstat"></span> <button class="linkbtn" id="rreset">清除筛选</button>
+    </div></div>`;
+}
+function bindResultFilter() {
+  const bar = $("#rfilter");
+  if (!bar) return;
+  bar.querySelectorAll(".tchip").forEach(c => {
+    c.onclick = () => { setChip(c, !c.classList.contains("on")); applyResultFilter(); };
+    c.onkeydown = e => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); c.click(); } };
+  });
+  ["#rscore", "#rad"].forEach(s => $(s).onchange = applyResultFilter);
+  ["#rq", "#rex"].forEach(s => $(s).oninput = applyResultFilter);
+  $("#rreset").onclick = () => {
+    bar.querySelectorAll(".tchip.on").forEach(c => setChip(c, false));
+    $("#rscore").value = "0"; $("#rad").checked = false; $("#rq").value = $("#rex").value = "";
+    applyResultFilter();
+  };
+  applyResultFilter();
+}
+function applyResultFilter() {
+  const on = a => new Set([...document.querySelectorAll(`#rfilter [${a}].on`)].map(c => c.getAttribute(a)));
+  const ft = on("data-ft"), fp = on("data-fp"), min = +$("#rscore").value, ad = $("#rad").checked;
+  const q = words($("#rq").value.toLowerCase()), ex = words($("#rex").value.toLowerCase());
+  let shown = 0, total = 0;
+  document.querySelectorAll(".dim").forEach(card => {
+    let n = 0;
+    const cards = card.querySelectorAll(".v");
+    cards.forEach(el => {
+      const d = el.dataset, t = d.text;
+      const ok = (!ft.size || ft.has(d.vt)) && (!fp.size || fp.has(d.pf)) && +d.score >= min && (!ad || d.ad === "1")
+        && q.every(w => t.includes(w)) && !ex.some(w => t.includes(w));
+      el.classList.toggle("off", !ok);
+      if (!ok) el.querySelector(".sel").checked = false;
+      n += ok;
+    });
+    total += cards.length; shown += n;
+    const cnt = card.querySelector("[data-cnt]");
+    if (cnt) cnt.textContent = cards.length ? (n === cards.length ? `· ${n} 条` : `· 显示 ${n} / ${cards.length} 条`) : "";
+  });
+  $("#rstat").textContent = shown === total ? `共 ${total} 条` : `显示 ${shown} / ${total} 条`;
+  updSel();
 }
 
 async function loadPlatform(pl, box) {
@@ -362,7 +518,7 @@ function updSel() {
   $("#selcount").textContent = `已选 ${n} 条`; $("#dlbtn").disabled = n === 0;
 }
 $("#selall").onclick = () => {
-  const all = [...document.querySelectorAll(".sel")], on = all.some(c => !c.checked);
+  const all = [...document.querySelectorAll(".v:not(.off) .sel")], on = all.some(c => !c.checked);
   all.forEach(c => c.checked = on); updSel();
 };
 $("#dlbtn").onclick = () => {
@@ -374,6 +530,7 @@ $("#dlbtn").onclick = () => {
 };
 let DIRECT = new Set();
 fetch("/api/direct_platforms").then(r => r.json()).then(a => DIRECT = new Set(a)).catch(() => {});
+swrJSON("/api/video_types", renderTypes);
 loadSources();
 loadHistory();
 refreshTasks();

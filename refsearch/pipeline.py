@@ -5,7 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import config
+from . import config, filters as flt
 from .analyze import analyze_product
 from .downloader import download
 from .platforms import platform_links
@@ -25,7 +25,7 @@ MAX_CANDIDATES = 90  # 每个维度送去打分的候选上限，控制 DeepSeek
 def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
                per_query: int = 8, max_duration: int = 300, top_per_dim: int = 10,
                min_score: int = 5, download_mode: str = "none", download_top: int = 5,
-               max_height: int = 720, progress=_noop) -> dict:
+               max_height: int = 720, filters: dict | None = None, progress=_noop) -> dict:
     t0 = time.time()
     config.RUNS_DIR.mkdir(parents=True, exist_ok=True)
     base = time.strftime("%Y%m%d-%H%M%S")
@@ -42,7 +42,12 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
 
     # 1. 识图拆词
     progress("① 识别产品并拆解关键词…")
-    analysis = analyze_product(str(img_copy), brief)
+    f = flt.normalize(filters)
+    if flt.describe(f):
+        progress(f"筛选条件：{flt.describe(f)}")
+    analysis = analyze_product(str(img_copy), brief, flt.prompt_hint(f))
+    if (td := flt.type_dimension(analysis, f)):
+        analysis["dimensions"].insert(0, td)
     p = analysis["product"]
     progress(f"识别为：{p.get('brand','')} {p.get('name','')}（{p.get('category','')}），"
              f"{len(analysis['dimensions'])} 个参考维度")
@@ -73,12 +78,14 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
         raw = [v for vids in ex.map(do, tasks) for v in vids]
     progress(f"共获得 {len(raw)} 条原始结果" + (f"，{len(errors)} 次检索失败" if errors else ""))
 
-    # 去重 + 时长过滤（太长的多为合集/长视频，太短的多为片段）
+    # 去重 + 硬筛选：时长（太长的多为合集/长视频，太短的多为片段）、排除词、必含词
     by_dim: dict[str, dict[str, dict]] = {}
+    dropped: dict[str, set] = {}
     for v in raw:
-        if v.get("duration") and not (5 <= v["duration"] <= max_duration):
-            continue
         v["url"] = canonical(v["url"])
+        if (why := flt.pre_filter(v, f, max_duration)):
+            dropped.setdefault(why, set()).add(v["url"])
+            continue
         by_dim.setdefault(v["dim"], {}).setdefault(v["url"], v)
 
     # 3. 重排（各维度并行）
@@ -88,10 +95,13 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
     def rank(d):
         try:
             cands = _balanced(list(by_dim[d["key"]].values()), MAX_CANDIDATES, keep_order=True)
-            return d["key"], rank_dimension(analysis, d, cands)
+            return d["key"], rank_dimension(analysis, d, cands, hint=flt.rank_hint(f))
         except Exception as e:
             errors.append(f"重排「{d.get('name')}」：{str(e)[:150]}")
-            return d["key"], list(by_dim[d["key"]].values())
+            vids = list(by_dim[d["key"]].values())
+            for v in vids:
+                v.setdefault("vtype", flt.guess_type(v))
+            return d["key"], vids
 
     with ThreadPoolExecutor(max_workers=5) as ex:
         ranked = dict(ex.map(rank, dims))
@@ -103,18 +113,29 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
             if v["url"] not in best or v.get("score", 0) > best[v["url"]][0]:
                 best[v["url"]] = (v.get("score", 0), key)
 
+    # 重排后筛选：类型、广告正片、最低分
     groups = []
     for d in analysis["dimensions"]:
-        vids = [v for v in ranked.get(d["key"], [])
-                if best.get(v["url"], (0, None))[1] == d["key"] and v.get("score", 0) >= min_score]
+        vids = []
+        for v in ranked.get(d["key"], []):
+            if best.get(v["url"], (0, None))[1] != d["key"]:
+                continue
+            why = flt.post_filter(v, f) or ("score" if v.get("score", 0) < min_score else None)
+            if why:
+                dropped.setdefault(why, set()).add(v["url"])
+            else:
+                v["vtype_name"] = flt.TYPE_NAMES.get(v.get("vtype"), "其他")
+                vids.append(v)
         groups.append({**d, "videos": _balanced(vids, top_per_dim)})
 
     result = {
         "run_id": run_id, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "image": img_copy.name, "brief": brief, "sources": list(platforms), "analysis": analysis,
+        "filters": f,
         "groups": groups, "platform_links": platform_links(analysis),
         "stats": {"queries": len(tasks), "raw": len(raw),
                   "kept": sum(len(g["videos"]) for g in groups),
+                  "filtered": {k: len(v) for k, v in dropped.items()},
                   "seconds": round(time.time() - t0, 1)},
         "errors": errors, "downloads": [],
     }
@@ -180,6 +201,7 @@ def list_runs() -> list[dict]:
             "thumb": f"/img?run={r['run_id']}&w=160",
             "product": f"{p.get('brand', '')} {p.get('name', '')}".strip(),
             "category": p.get("category", ""), "kept": len(vids),
+            "filters": flt.describe(flt.normalize(r.get("filters"))),
             "platforms": sorted({v["platform"] for v in vids}),
             "downloads": sum(1 for d in r.get("downloads", []) if d.get("ok")),
         })

@@ -24,7 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from refsearch import config, pipeline, platforms, player, security, tasks
+from refsearch import config, filters as flt, pipeline, platforms, player, security, tasks
 from refsearch.searchers import SOURCES
 
 UPLOADS = config.RUNS_DIR / "_uploads"
@@ -61,6 +61,18 @@ class Source(BaseModel):
     languages: list[str] = Field(description="该渠道使用的关键词语言")
 
 
+class Filters(BaseModel):
+    types: list[Literal[tuple(flt.VIDEO_TYPES)]] = Field(
+        [], description="目标视频类型，见 GET /video-types：tvc / brand / ugc / product / story / cg / case / review；不传则不限")
+    type_mode: Literal["prefer", "only"] = Field(
+        "prefer", description="prefer：优先这些类型（打分倾斜）；only：只保留这些类型")
+    keywords: list[str] = Field([], description="附加检索词，会拼上品类词单独检索，如 [\"开学季\", \"vlog\"]")
+    must: list[str] = Field([], description="结果的标题/频道/简介必须包含其中任一词")
+    exclude: list[str] = Field([], description="排除词，标题/频道/简介含任一词即丢弃，如 [\"合集\", \"教程\"]")
+    min_duration: int = Field(0, ge=0, le=3600, description="最短秒数")
+    ad_only: bool = Field(False, description="只保留广告正片（is_ad=true）")
+
+
 class SearchCreate(BaseModel):
     image_url: str | None = Field(None, description="产品图公网地址（jpg/png/webp，≤15MB）。与 image_base64 二选一")
     image_base64: str | None = Field(None, description="产品图 base64，可带 data:image/...;base64, 前缀")
@@ -70,6 +82,7 @@ class SearchCreate(BaseModel):
     max_duration: int = Field(300, ge=10, le=1800, description="视频最长秒数，只要 TVC 建议 90")
     top_per_dim: int = Field(10, ge=1, le=30, description="每个参考维度最多保留几条")
     min_score: int = Field(5, ge=0, le=10, description="AI 评分低于此值的丢弃")
+    filters: Filters = Field(default_factory=Filters, description="类型定向与结果筛选")
     download: Literal["none", "top", "all"] = Field("none", description="检索完是否顺带下载：不下载 / 前 N 条 / 全部")
     download_top: int = Field(5, ge=1, le=50, description="download=top 时下载几条")
     max_height: Literal[360, 480, 720, 1080] = Field(720, description="下载清晰度上限")
@@ -80,6 +93,7 @@ class SearchCreate(BaseModel):
 class RerunCreate(BaseModel):
     sources: list[str] | None = Field(None, description="不传则全部渠道")
     brief: str | None = Field(None, description="不传则沿用原简报")
+    filters: Filters | None = Field(None, description="不传则沿用原筛选条件")
     callback_url: str | None = None
     external_id: str | None = Field(None, max_length=128)
 
@@ -136,6 +150,8 @@ class Video(BaseModel):
     published: str
     score: float = Field(description="AI 参考价值评分 0~10")
     is_ad: bool | None = Field(description="是否为广告正片")
+    video_type: str | None = Field(description="视频类型 key（AI 判断），见 GET /video-types；other 为其他")
+    video_type_name: str | None
     reference: str = Field(description="具体参考点")
     reason: str
     embed_url: str | None = Field(description="可直接放进 iframe 的官方播放器地址；null 时调用 /play 解析")
@@ -143,7 +159,8 @@ class Video(BaseModel):
 
 
 class Dimension(BaseModel):
-    key: str = Field(description="category 同品类 / competitor 竞品 / emotion 情绪主题 / structure 结构形式 / award 获奖标杆")
+    key: str = Field(description="type 类型定向（指定了 filters.types 或 keywords 时才有）/ category 同品类 / "
+                                 "competitor 竞品 / emotion 情绪主题 / structure 结构形式 / award 获奖标杆")
     name: str
     what_to_learn: str = Field(description="这个维度参考什么")
     queries_zh: list[str]
@@ -172,7 +189,8 @@ class Run(BaseModel):
     product: dict = Field(description="产品画像：brand/name/category/appearance/selling_points/target_audience/tone/competitors")
     dimensions: list[Dimension]
     reference_platforms: list[ReferencePlatform]
-    stats: dict = Field(description="queries/raw/kept/seconds")
+    filters: dict = Field(description="本次使用的筛选条件")
+    stats: dict = Field(description="queries/raw/kept/seconds；filtered 为各原因筛掉的条数")
     errors: list[str]
 
 
@@ -234,6 +252,7 @@ def run_out(r: dict, base: str) -> dict:
         return {**{k: v.get(k) for k in ("platform", "url", "title", "channel", "duration", "views",
                                           "thumbnail", "published", "is_ad", "reason")},
                 "score": v.get("score", 0), "reference": v.get("reference", ""),
+                "video_type": v.get("vtype"), "video_type_name": flt.TYPE_NAMES.get(v.get("vtype")),
                 "embed_url": player.embed_url(v["url"]),
                 "download": None if not d else {
                     "ok": d["ok"], "size_mb": d.get("size_mb", 0), "error": d.get("error"),
@@ -252,6 +271,7 @@ def run_out(r: dict, base: str) -> dict:
                                  "search_url": p["url"], "direct": "fetch" in next(
                                      (x for x in platforms.PLATFORMS if x["name"] == p["name"]), {})}
                                 for p in r.get("platform_links", [])],
+        "filters": flt.normalize(r.get("filters")),
         "stats": r.get("stats", {}), "errors": r.get("errors", []),
     }
 
@@ -349,10 +369,21 @@ def _save_upload(data: bytes, ext: str) -> Path:
 def _opts(p: SearchCreate) -> dict:
     return {"per_query": p.per_query, "max_duration": p.max_duration, "top_per_dim": p.top_per_dim,
             "min_score": p.min_score, "download_mode": p.download, "download_top": p.download_top,
-            "max_height": p.max_height}
+            "max_height": p.max_height, "filters": p.filters.model_dump()}
 
 
 # ---------------- 接口 ----------------
+class VideoType(BaseModel):
+    key: str
+    name: str
+    desc: str
+
+
+@router.get("/video-types", response_model=list[VideoType], summary="视频类型列表（用于 filters.types）", tags=["基础"])
+def list_video_types():
+    return flt.type_list()
+
+
 @router.get("/sources", response_model=list[Source], summary="检索渠道列表", tags=["基础"])
 def list_sources():
     return [{"key": k, "name": v[2], "group": v[3], "languages": list(v[1])} for k, v in SOURCES.items()]
@@ -394,6 +425,7 @@ async def create_search_upload(request: Request, image: UploadFile = File(..., d
                                top_per_dim: int = Form(10), min_score: int = Form(5),
                                download: str = Form("none"), download_top: int = Form(5),
                                max_height: int = Form(720), callback_url: str = Form(""),
+                               filters: str = Form("", description="JSON 字符串，结构同 Filters"),
                                external_id: str = Form(""), who: str = Depends(client)):
     ext = Path(image.filename or "").suffix.lower()
     if ext not in (".jpg", ".jpeg", ".png", ".webp"):
@@ -403,8 +435,9 @@ async def create_search_upload(request: Request, image: UploadFile = File(..., d
                          per_query=per_query, max_duration=max_duration, top_per_dim=top_per_dim,
                          min_score=min_score, download=download, download_top=download_top,
                          max_height=max_height, callback_url=callback_url or None,
-                         external_id=external_id or None)
-    except ValueError as e:
+                         external_id=external_id or None,
+                         filters=Filters(**json.loads(filters)) if filters.strip() else Filters())
+    except (ValueError, TypeError) as e:
         raise ApiError(422, "invalid_request", str(e)[:500])
     _check_callback(p.callback_url)
     pfs = _sources(p.sources)
@@ -463,7 +496,8 @@ def rerun(run_id: str, p: RerunCreate, request: Request, who: str = Depends(clie
     if p.external_id is None:
         p.external_id = old.get("external_id")
     title = "重新检索：" + (old["analysis"].get("product", {}).get("name") or run_id)[:30]
-    return _launch(image, p, brief, _sources(p.sources), who, _base(request), title, False)
+    f = p.filters.model_dump() if p.filters else old.get("filters")
+    return _launch(image, p, brief, _sources(p.sources), who, _base(request), title, False, {"filters": f})
 
 
 @router.post("/runs/{run_id}/downloads", response_model=TaskCreated, status_code=202, tags=["下载"],

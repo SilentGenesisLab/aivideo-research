@@ -19,12 +19,14 @@ PROMPT = """请仔细观察这张产品图{brief_part}，完成两件事：
   - queries_zh：2 个中文搜索词（用于 B 站，2~6 个词，含"广告""TVC""广告片"等词）
   - queries_en：2 个英文搜索词（用于 YouTube，含 commercial / ad / TVC 等词）
 搜索词要像真人在视频平台上搜的那样短而具体，不要写成句子。
+{hint}
 
 输出 JSON 格式：
 {{
   "product": {{
     "brand": "", "name": "", "category": "", "appearance": "",
-    "selling_points": [""], "target_audience": "", "tone": "", "competitors": [""]
+    "selling_points": [""], "target_audience": "", "tone": "", "competitors": [""],
+    "search_zh": "2~6 字的中文核心品类词，如 电动牙刷", "search_en": "英文核心品类词，如 electric toothbrush"
   }},
   "dimensions": [
     {{"key": "category", "name": "同品类", "what_to_learn": "", "queries_zh": ["",""], "queries_en": ["",""]}}
@@ -33,9 +35,10 @@ PROMPT = """请仔细观察这张产品图{brief_part}，完成两件事：
 dimensions 的 key 依次为 category / competitor / emotion / structure / award。"""
 
 
-def analyze_product(image_path: str, brief: str = "") -> dict:
+def analyze_product(image_path: str, brief: str = "", hint: str = "") -> dict:
     brief_part = f"，并参考用户补充的简报：「{brief.strip()}」" if brief.strip() else ""
-    data = chat_json(SYSTEM, PROMPT.format(brief_part=brief_part), image_path=image_path)
+    hint = f"\n三、检索偏好（必须遵守）：\n{hint}\n" if hint else ""
+    data = chat_json(SYSTEM, PROMPT.format(brief_part=brief_part, hint=hint), image_path=image_path)
     dims = data.get("dimensions") or []
     if not dims:
         raise ValueError(f"模型未返回检索维度：{data}")

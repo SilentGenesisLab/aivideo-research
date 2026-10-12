@@ -71,6 +71,8 @@
   .badge { position:absolute; top:8px; left:8px; background:rgba(0,0,0,.7); color:#fff; padding:1px 8px; border-radius:10px; font-size:12px; }
   .badge.score { left:auto; right:8px; background:var(--accent); }
   .badge.dl { top:auto; bottom:8px; background:var(--ok); }
+  .badge.ty { top:auto; bottom:8px; }
+  .badge.ty + .badge.dl { left:auto; right:8px; }
   .vb { padding:10px 12px; display:flex; flex-direction:column; gap:4px; flex:1; font-size:13px; }
   .vt { font-weight:600; color:var(--text); text-decoration:none; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
   .vt:hover { color:var(--accent); }
@@ -93,6 +95,7 @@
     <div class="card"><h3>近 30 天检索量</h3><div id="perday"></div></div>
     <div class="grid2">
       <div class="card"><h3>参考视频来源（去重）</h3><div id="byplatform"></div></div>
+      <div class="card"><h3>视频类型（去重）</h3><div id="bytype"></div></div>
       <div class="card"><h3>调用方（检索次数）</h3><div id="byclient"></div></div>
     </div>
     <div class="grid2">
@@ -108,18 +111,22 @@
       <div class="filters">
         <input type="search" id="vq" placeholder="搜索标题、参考点、品牌、品类、频道，空格分隔多个词">
         <select id="vplatform"><option value="">全部来源</option></select>
-        <select id="vdim"><option value="">全部维度</option><option value="category">同品类</option>
+        <select id="vtype"><option value="">全部类型</option></select>
+        <select id="vdim"><option value="">全部维度</option><option value="type">类型定向</option><option value="category">同品类</option>
           <option value="competitor">竞品</option><option value="emotion">情绪主题</option>
           <option value="structure">结构形式</option><option value="award">获奖标杆</option></select>
         <select id="vscore"><option value="0">全部评分</option><option value="7">≥ 7 分</option>
           <option value="8" selected>≥ 8 分</option><option value="9">≥ 9 分</option></select>
         <select id="vclient"><option value="">全部调用方</option></select>
         <select id="vsort"><option value="score">按评分</option><option value="new">按时间</option><option value="views">按播放量</option></select>
+        <input type="search" id="vex" placeholder="排除词，如 合集 教程" style="max-width:180px">
+        <label class="note"><input type="checkbox" id="vad"> 只看广告正片</label>
         <label class="note"><input type="checkbox" id="vdl"> 只看已下载</label>
         <button class="btn" id="vgo">搜索</button>
       </div>
       <div class="note" id="vstat"></div>
     </div>
+    <div class="chips" id="vtchips"></div>
     <div class="chips" id="vchips"></div>
     <div class="vgrid" id="vgrid"></div>
     <div class="more"><button class="ghost hidden" id="vmore">加载更多</button></div>
@@ -214,6 +221,7 @@ function renderOverview(o) {
   ]);
   vbars($("#perday"), o.runs_per_day);
   hbars($("#byplatform"), o.by_platform);
+  hbars($("#bytype"), o.by_type || []);
   hbars($("#byclient"), o.by_client);
   hbars($("#bycategory"), o.by_category);
   hbars($("#scorehist"), o.score_hist.map(r => [r.score + " 分", r.count]));
@@ -225,11 +233,11 @@ function renderOverview(o) {
 }
 
 // ---------- 视频库 ----------
-let vOffset = 0, vPlatform = "";
+let vOffset = 0, vPlatform = "", vTypes = null;
 async function loadVideos(append = false) {
   if (!append) { vOffset = 0; }
   const p = new URLSearchParams({q: $("#vq").value.trim(), platform: vPlatform || $("#vplatform").value,
-    dim: $("#vdim").value, min_score: $("#vscore").value, client: $("#vclient").value,
+    dim: $("#vdim").value, vtype: $("#vtype").value, ad_only: $("#vad").checked, exclude: $("#vex").value.trim(), min_score: $("#vscore").value, client: $("#vclient").value,
     downloaded: $("#vdl").checked, sort: $("#vsort").value, limit: 60, offset: vOffset});
   if (append) return renderVideos(await get("/api/admin/videos?" + p), true);
   return swrJSON("/api/admin/videos?" + p, r => renderVideos(r, false));
@@ -238,13 +246,19 @@ function renderVideos(r, append) {
   if (!append) vOffset = 0;
   fillSelect($("#vplatform"), r.all_platforms);
   fillSelect($("#vclient"), r.clients);
+  if (!vTypes) {  // 类型下拉只填一次
+    vTypes = get("/api/video_types").then(list => $("#vtype").insertAdjacentHTML("beforeend",
+      [...list, {key: "other", name: "其他"}]
+        .map(t => `<option value="${esc(t.key)}">${esc(t.name)}</option>`).join(""))).catch(() => { vTypes = null; });
+  }
+  $("#vtchips").innerHTML = r.types.map(([k, n, c]) => `<span class="chip ${$("#vtype").value === k ? "on" : ""}" data-vt="${esc(k)}">${esc(n)} ${c}</span>`).join("");
   $("#vstat").textContent = `共 ${r.total} 条（同一视频出现在多次检索中只算一条）`;
   $("#vchips").innerHTML = r.platforms.map(([n, c]) => `<span class="chip ${vPlatform === n ? "on" : ""}" data-pf="${esc(n)}">${esc(n)} ${c}</span>`).join("");
   const cards = r.items.map(v => `<div class="vc">
     <a class="thumb" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${playAttrs(v.url, v.title, v.platform, v.local)}>
       <img src="${esc(thumbUrl(v.thumbnail, 480))}" loading="lazy" decoding="async" alt=""><span class="play">▶</span>
       <span class="badge">${esc(v.platform)}${v.duration ? " · " + Math.floor(v.duration / 60) + ":" + String(v.duration % 60).padStart(2, "0") : ""}</span>
-      <span class="badge score">${esc(v.score)}分</span>${v.local ? `<span class="badge dl">已下载</span>` : ""}</a>
+      <span class="badge score">${esc(v.score)}分</span><span class="badge ty" title="${v.vtype_guessed ? "旧结果，按标题关键词粗分" : "AI 判断"}">${esc(v.vtype_name)}${v.vtype_guessed ? "?" : ""}</span>${v.local ? `<span class="badge dl">已下载</span>` : ""}</a>
     <div class="vb"><a class="vt" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${playAttrs(v.url, v.title, v.platform, v.local)}>${esc(v.title)}</a>
       <div class="meta">${esc([v.channel, v.views != null ? "播放 " + fmtViews(v.views) : "", v.dim_name].filter(Boolean).join(" · "))}</div>
       ${v.reference ? `<div class="ref">${esc(v.reference)}</div>` : ""}
@@ -255,8 +269,12 @@ function renderVideos(r, append) {
   $("#vmore").classList.toggle("hidden", vOffset >= r.total);
 }
 $("#vgo").onclick = () => loadVideos();
-$("#vq").onkeydown = e => { if (e.key === "Enter") loadVideos(); };
-["#vplatform", "#vdim", "#vscore", "#vclient", "#vsort", "#vdl"].forEach(s => $(s).onchange = () => { vPlatform = ""; loadVideos(); });
+$("#vq").onkeydown = $("#vex").onkeydown = e => { if (e.key === "Enter") loadVideos(); };
+$("#vtchips").onclick = e => {
+  const c = e.target.closest("[data-vt]"); if (!c) return;
+  $("#vtype").value = $("#vtype").value === c.dataset.vt ? "" : c.dataset.vt; loadVideos();
+};
+["#vplatform", "#vtype", "#vdim", "#vscore", "#vclient", "#vsort", "#vad", "#vdl"].forEach(s => $(s).onchange = () => { vPlatform = ""; loadVideos(); });
 $("#vmore").onclick = () => loadVideos(true);
 $("#vchips").onclick = e => {
   const c = e.target.closest("[data-pf]"); if (!c) return;

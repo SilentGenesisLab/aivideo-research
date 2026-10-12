@@ -78,7 +78,8 @@ def online(image):
     hook_url = f"http://127.0.0.1:{hook_srv.server_port}/hook"
     port = 8798
     env = {**os.environ, "API_KEYS": f"siteA:{KEY},siteB:{KEY2}", "WEBHOOK_SECRET": HOOK_SECRET,
-           "ALLOW_PRIVATE_URLS": "1", "APP_PASSWORD": "web-pass-for-test"}
+           "ALLOW_PRIVATE_URLS": "1", "APP_PASSWORD": "web-pass-for-test",
+           "PUBLIC_BASE_URL": ""}  # 链接指向测试服务器本身，而不是 .env 里配置的线上域名
     srv = subprocess.Popen([sys.executable, "server.py", "--port", str(port)], cwd=ROOT, env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base, h, h2 = f"http://127.0.0.1:{port}", {"X-API-Key": KEY}, {"Authorization": f"Bearer {KEY2}"}
@@ -97,6 +98,8 @@ def online(image):
         check("OpenAPI 含全部接口", len(spec["paths"]) >= 12, list(spec["paths"]))
         srcs = requests.get(f"{base}/api/v1/sources", headers=h).json()
         check("渠道列表", len(srcs) >= 15 and {"key", "name", "group", "languages"} <= set(srcs[0]))
+        vt = requests.get(f"{base}/api/v1/video-types", headers=h).json()
+        check("视频类型列表", {"tvc", "brand", "ugc"} <= {t["key"] for t in vt}, vt)
         check("Bearer 方式鉴权", requests.get(f"{base}/api/v1/sources", headers=h2).status_code == 200)
 
         b64 = base64.b64encode(Path(image).read_bytes()).decode()
@@ -106,6 +109,8 @@ def online(image):
         check("缺图片 400", r.status_code == 400 and r.json()["error"]["code"] == "invalid_image", r.text)
         r = requests.post(f"{base}/api/v1/searches", headers=h, json={"image_base64": b64, "per_query": 99})
         check("参数越界 422", r.status_code == 422 and r.json()["error"]["code"] == "invalid_request", r.text)
+        r = requests.post(f"{base}/api/v1/searches", headers=h, json={"image_base64": b64, "filters": {"types": ["bad"]}})
+        check("未知视频类型 422", r.status_code == 422, r.text)
         r = requests.post(f"{base}/api/v1/searches", headers=h, json={"image_base64": "data:image/png;base64,AAAA"})
         check("非图片 base64 400", r.status_code == 400, r.text)
 
@@ -113,12 +118,14 @@ def online(image):
         r = requests.post(f"{base}/api/v1/searches", headers=h, json={
             "image_base64": "data:image/jpeg;base64," + b64, "brief": "30秒TVC，年轻白领，零糖",
             "sources": ["youku", "digitaling", "acfun", "bilibili"], "per_query": 5, "max_duration": 120,
-            "download": "top", "download_top": 1, "callback_url": hook_url, "external_id": "order-123"})
+            "download": "top", "download_top": 1, "callback_url": hook_url, "external_id": "order-123",
+            "filters": {"types": ["tvc", "brand"], "exclude": ["合集", "教程"]}})
         check("创建检索 202 秒回", r.status_code == 202 and time.time() - t0 < 5, r.text)
         created = r.json()
         with open(image, "rb") as f:
             r = requests.post(f"{base}/api/v1/searches/upload", headers=h2, files={"image": ("p.jpg", f, "image/jpeg")},
-                              data={"brief": "上传方式", "sources": "youku", "per_query": "3"})
+                              data={"brief": "上传方式", "sources": "youku", "per_query": "3",
+                                    "filters": json.dumps({"types": ["ugc"], "type_mode": "only"})})
         check("multipart 上传创建检索", r.status_code == 202, r.text)
         up = r.json()
         check("其他站点看不到别人的任务",
@@ -132,8 +139,13 @@ def online(image):
         check("任务带回 external_id 和结果地址", t["external_id"] == "order-123" and t["result_url"], t)
         run = requests.get(t["result_url"], headers=h).json()
         check("结果结构完整", {"product", "dimensions", "reference_platforms", "product_image_url"} <= set(run)
-              and len(run["dimensions"]) == 5, list(run))
+              and len(run["dimensions"]) == 6, list(run))
         vids = [v for d in run["dimensions"] for v in d["videos"]]
+        check("类型定向维度排在最前", run["dimensions"][0]["key"] == "type"
+              and any("TV commercial" in q or "TVC" in q for q in run["dimensions"][0]["queries_en"]), run["dimensions"][0])
+        check("筛选条件随结果返回", run["filters"]["types"] == ["tvc", "brand"] and "filtered" in run["stats"], run["filters"])
+        check("每条视频都有类型", all(v["video_type"] and v["video_type_name"] for v in vids))
+        check("排除词生效", not any("合集" in v["title"] or "教程" in v["title"] for v in vids))
         check("结果有视频与参考点", vids and all(v["url"] and "reference" in v for v in vids), len(vids))
         check("可内嵌视频带 embed_url", any(v["embed_url"] for v in vids))
         img = requests.get(run["product_image_url"])

@@ -1,6 +1,8 @@
 """输出 Markdown 报告（方便贴进飞书/Notion 素材库）。"""
 from pathlib import Path
 
+from . import filters
+
 
 def _dur(s):
     return f"{s // 60}:{s % 60:02d}" if s else "-"
@@ -20,6 +22,8 @@ def write_markdown(result: dict, path: Path) -> None:
          f"原始 {result['stats']['raw']} 条，保留 {result['stats']['kept']} 条", ""]
     if result.get("brief"):
         L += [f"**简报**：{result['brief']}", ""]
+    if (f := filters.describe(filters.normalize(result.get("filters")))):
+        L += [f"**筛选条件**：{f}", ""]
     L += ["## 产品画像", "",
           f"- 品牌 / 产品：{p.get('brand','')} / {p.get('name','')}",
           f"- 品类：{p.get('category','')}",
@@ -36,11 +40,11 @@ def write_markdown(result: dict, path: Path) -> None:
         if not g["videos"]:
             L += ["（未找到达标结果，可换关键词或去下方参考平台手动搜）", ""]
             continue
-        L += ["| 分 | 平台 | 标题 | 时长 | 播放 | 参考点 |", "|---|---|---|---|---|---|"]
+        L += ["| 分 | 类型 | 平台 | 标题 | 时长 | 播放 | 参考点 |", "|---|---|---|---|---|---|---|"]
         for v in g["videos"]:
             title = v["title"].replace("|", "/")
             ref = (v.get("reference") or "").replace("|", "/")
-            L.append(f"| {v.get('score','-')} | {v['platform']} | [{title}]({v['url']}) | "
+            L.append(f"| {v.get('score','-')} | {filters.TYPE_NAMES.get(v.get('vtype'), '-')} | {v['platform']} | [{title}]({v['url']}) | "
                      f"{_dur(v.get('duration'))} | {_views(v.get('views'))} | {ref} |")
         L.append("")
     L += ["## 参考平台（需手动浏览）", "", "| 平台 | 类型 | 参考什么 | 直达搜索 |", "|---|---|---|---|"]

@@ -3,6 +3,7 @@
 在 .env 配置 APP_PASSWORD 后启用登录（登录页 /login，用户名 APP_USER，默认 admin；脚本可用 HTTP Basic Auth）。
 未配置密码时拒绝监听非本机地址。"""
 import argparse
+import json
 import os
 import sys
 import uuid
@@ -19,7 +20,7 @@ from pydantic import BaseModel
 import api_v1
 import time
 
-from refsearch import auth, config, downloader, images, pipeline, platforms, player, security, stats, tasks
+from refsearch import auth, config, downloader, filters, images, pipeline, platforms, player, security, stats, tasks
 from refsearch.searchers import SOURCES
 
 app = FastAPI(title="参考视频检索", docs_url=None, redoc_url=None, openapi_url=None)  # 对外文档见 /api/v1/docs
@@ -205,9 +206,9 @@ def admin_overview(days: int = 30):
 @app.get("/api/admin/videos")
 def admin_videos(q: str = "", platform: str = "", dim: str = "", min_score: float = 0, client: str = "",
                  downloaded: bool = False, dedupe: bool = True, sort: str = "score",
-                 limit: int = 60, offset: int = 0):
+                 limit: int = 60, offset: int = 0, vtype: str = "", ad_only: bool = False, exclude: str = ""):
     return stats.search_videos(q, platform, dim, min_score, client, downloaded, dedupe, sort,
-                               min(max(limit, 1), 200), max(offset, 0))
+                               min(max(limit, 1), 200), max(offset, 0), vtype, ad_only, exclude)
 
 
 @app.get("/api/admin/tasks")
@@ -231,6 +232,18 @@ def sources():
     return [{"key": k, "name": v[2], "group": v[3]} for k, v in SOURCES.items()]
 
 
+@app.get("/api/video_types")
+def video_types():
+    return filters.type_list()
+
+
+def _filters(raw: str) -> dict:
+    try:
+        return filters.normalize(json.loads(raw) if raw.strip() else {})
+    except (ValueError, AttributeError):
+        raise HTTPException(400, "filters 不是有效的 JSON")
+
+
 @app.get("/api/runs")
 def runs():
     return pipeline.list_runs()
@@ -240,6 +253,7 @@ class RerunReq(BaseModel):
     run_id: str
     platforms: list[str] = []
     brief: str | None = None
+    filters: dict | None = None  # 不传则沿用原筛选条件
 
 
 @app.post("/api/rerun")
@@ -252,8 +266,10 @@ def rerun(req: RerunReq):
     pfs = tuple(p for p in req.platforms if p in SOURCES) or pipeline.DEFAULT_SOURCES
     brief = old.get("brief", "") if req.brief is None else req.brief
 
+    f = filters.normalize(old.get("filters") if req.filters is None else req.filters)
+
     def work(progress):
-        return pipeline.run_search(str(image), brief, pfs, progress=progress)
+        return pipeline.run_search(str(image), brief, pfs, filters=f, progress=progress)
 
     title = (old.get("analysis", {}).get("product", {}).get("name") or brief or req.run_id)[:40]
     return {"job_id": tasks.submit("search", f"重新检索：{title}", work,
@@ -265,7 +281,7 @@ def rerun(req: RerunReq):
 async def search(image: UploadFile = File(...), brief: str = Form(""),
                  platforms: str = Form(",".join(pipeline.DEFAULT_SOURCES)), per_query: int = Form(8),
                  max_duration: int = Form(300), download_mode: str = Form("none"),
-                 download_top: int = Form(5)):
+                 download_top: int = Form(5), min_score: int = Form(5), filters: str = Form("")):
     suffix = Path(image.filename or "x.jpg").suffix.lower()
     if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
         raise HTTPException(400, "仅支持 jpg / png / webp")
@@ -278,12 +294,14 @@ async def search(image: UploadFile = File(...), brief: str = Form(""),
     tmp = UPLOADS / f"{uuid.uuid4().hex}{suffix}"
     tmp.write_bytes(data)
     pfs = tuple(p for p in platforms.split(",") if p in pipeline.DEFAULT_SOURCES) or pipeline.DEFAULT_SOURCES
+    f = _filters(filters)
+    min_score = min(max(min_score, 0), 10)
 
     def work(progress):
         try:
             return pipeline.run_search(str(tmp), brief, pfs, per_query, max_duration,
-                                       download_mode=download_mode, download_top=download_top,
-                                       progress=progress)
+                                       min_score=min_score, download_mode=download_mode,
+                                       download_top=download_top, filters=f, progress=progress)
         finally:
             tmp.unlink(missing_ok=True)
 

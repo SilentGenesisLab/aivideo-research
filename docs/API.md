@@ -136,6 +136,7 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/sources` | 检索渠道列表 |
+| GET | `/api/v1/video-types` | 视频类型列表（TVC / 品牌片 / UGC 等，用于筛选） |
 | POST | `/api/v1/searches` | 创建检索任务（JSON，图片用 URL 或 base64） |
 | POST | `/api/v1/searches/upload` | 创建检索任务（multipart 上传图片） |
 | GET | `/api/v1/tasks/{task_id}` | 查询任务 |
@@ -160,6 +161,23 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 
 当前 16 个渠道：`bilibili` `douyin` `youku` `tencent` `iqiyi` `acfun` `web_cn` `youtube` `dailymotion` `web_intl` `digitaling` `xinpianchang` `ispot` `adsoftheworld` `adweek` `culturepub`。以接口返回为准。
 
+### 5.1.1 GET /video-types
+
+视频类型，用于创建检索时的 `filters.types`，结果里每条视频也会带 `video_type`。
+
+| key | 名称 | 说明 |
+|---|---|---|
+| `tvc` | TVC 广告 | 电视/贴片广告正片，15~60 秒为主 |
+| `brand` | 品牌片 | 品牌宣传片、品牌形象片、发布会短片 |
+| `ugc` | UGC / 达人种草 | 达人口播、真实使用、种草带货类短视频 |
+| `product` | 产品展示 | 产品功能演示、卖点讲解、电商主图视频 |
+| `story` | 剧情广告 | 微电影、剧情短片、情感故事类广告 |
+| `cg` | CG / 动画 | 三维产品渲染、CG 特效、MG 动画 |
+| `case` | 案例 / 获奖 | 广告节获奖作品、Case Film 案例视频 |
+| `review` | 开箱测评 | 开箱、测评、对比（非广告，但常用来看卖点怎么讲） |
+
+结果里还可能出现 `other`（教程、新闻、Vlog、合集等）。类型由 AI 根据标题、频道和简介判断，没有看画面。
+
 ### 5.2 POST /searches
 
 请求体（JSON）：
@@ -174,11 +192,34 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | `max_duration` | int 10~1800 | 300 | 视频最长秒数；只要 TVC 建议 90 |
 | `top_per_dim` | int 1~30 | 10 | 每个维度最多保留几条 |
 | `min_score` | int 0~10 | 5 | 低于此评分的丢弃 |
+| `filters` | object | 不筛选 | 类型定向与结果筛选，见下表 |
 | `download` | `none`/`top`/`all` | `none` | 检索完是否顺带下载 |
 | `download_top` | int 1~50 | 5 | `download=top` 时下载几条 |
 | `max_height` | 360/480/720/1080 | 720 | 下载清晰度上限 |
 | `callback_url` | string | — | 任务结束时的 Webhook 地址 |
 | `external_id` | string ≤128 | — | 你的业务 ID，会原样出现在任务、结果和回调里 |
+
+`filters` 字段（都可选）：
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `types` | string[] | `[]` | 目标视频类型，取值见 [5.1.1](#511-get-video-types)。选了以后：① 额外生成一个 `key=type` 的“类型定向”维度，用“品类词 + 类型词”检索（如“气泡水 种草”“sparkling water TV commercial”）；② 其他维度的检索词也会偏向这些类型；③ AI 打分向这些类型倾斜 |
+| `type_mode` | `prefer`/`only` | `prefer` | `prefer` 只是优先；`only` 会丢掉其他类型 |
+| `keywords` | string[] | `[]` | 附加检索词，会和品类词组合单独检索，如 `["开学季", "vlog"]` |
+| `must` | string[] | `[]` | 标题/频道/简介必须包含其中**任一**词，否则丢弃 |
+| `exclude` | string[] | `[]` | 排除词，标题/频道/简介含任一词即丢弃，如 `["合集", "教程", "解说"]` |
+| `min_duration` | int | 0 | 最短秒数（最长用上面的 `max_duration`） |
+| `ad_only` | bool | false | 只保留广告正片（`is_ad=true`） |
+
+```json
+{
+  "image_url": "https://example.com/product.jpg",
+  "brief": "15秒信息流广告，年轻女性",
+  "filters": {"types": ["ugc", "tvc"], "type_mode": "only", "exclude": ["合集", "教程"], "keywords": ["开箱"]}
+}
+```
+
+被筛掉的条数按原因记在结果的 `stats.filtered`：`duration` 时长不符、`exclude` 含排除词、`must` 不含必含词、`type` 类型不符、`ad` 非广告正片、`score` 评分过低。
 
 返回 202：`{"task_id", "status": "queued", "status_url"}`
 
@@ -187,7 +228,8 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 `multipart/form-data`，字段与 5.2 相同，区别：
 
 - 图片用文件字段 `image` 上传；
-- `sources` 用逗号分隔的字符串，如 `bilibili,youku,digitaling`。
+- `sources` 用逗号分隔的字符串，如 `bilibili,youku,digitaling`；
+- `filters` 传 JSON 字符串，如 `-F 'filters={"types":["ugc"],"type_mode":"only"}'`。
 
 ```bash
 curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_KEY" \
@@ -258,6 +300,8 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
           "published": "",
           "score": 10,
           "is_ad": true,
+          "video_type": "tvc",
+          "video_type_name": "TVC 广告",
           "reference": "官方零卡气泡水16秒正片，学其清爽视觉与气泡动能表达",
           "reason": "本品牌同类正片，最佳对标",
           "embed_url": "https://www.youtube.com/embed/drZIKbUMEuY?autoplay=1&rel=0",
@@ -282,14 +326,18 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
       "direct": true
     }
   ],
-  "stats": {"queries": 170, "raw": 814, "kept": 50, "seconds": 125.0},
+  "filters": {"types": ["tvc"], "type_mode": "prefer", "keywords": [], "must": [], "exclude": ["合集"],
+              "min_duration": 0, "max_duration": 0, "ad_only": false},
+  "stats": {"queries": 170, "raw": 814, "kept": 50, "seconds": 125.0,
+            "filtered": {"duration": 51, "exclude": 9, "type": 0, "score": 29}},
   "errors": []
 }
 ```
 
 字段说明：
 
-- `dimensions[].key`：`category` 同品类、`competitor` 竞品、`emotion` 情绪主题、`structure` 结构形式、`award` 获奖标杆。
+- `dimensions[].key`：`type` 类型定向（传了 `filters.types` 或 `filters.keywords` 才有，排在最前）、`category` 同品类、`competitor` 竞品、`emotion` 情绪主题、`structure` 结构形式、`award` 获奖标杆。
+- `videos[].video_type`：AI 判断的视频类型，见 [5.1.1](#511-get-video-types)；旧结果可能为 `null`。
 - `videos[].reference` 是 AI 根据标题和简介推断的参考点，**没有看画面**，展示时建议注明“请看片核实”。
 - `videos[].embed_url` 为 `null` 表示该站不能直接内嵌，见 [第 6 节](#6-在你的页面里播放视频)。
 - `videos[].download` 为 `null` 表示没下载过。
@@ -300,10 +348,11 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
 用同一张产品图重新检索，常用于换渠道或改简报。
 
 ```json
-{"sources": ["bilibili", "douyin"], "brief": "改成15秒短视频", "callback_url": "...", "external_id": "..."}
+{"sources": ["bilibili", "douyin"], "brief": "改成15秒短视频", "filters": {"types": ["ugc"]},
+ "callback_url": "...", "external_id": "..."}
 ```
 
-所有字段可选：`sources` 不传则用全部渠道，`brief` 不传则沿用原简报。返回新的 `task_id`，会生成新的 `run_id`。
+所有字段可选：`sources` 不传则用全部渠道，`brief` 不传则沿用原简报，`filters` 不传则沿用原筛选条件。返回新的 `task_id`，会生成新的 `run_id`。
 
 ### 5.7 POST /runs/{run_id}/downloads
 

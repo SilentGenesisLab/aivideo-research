@@ -59,6 +59,27 @@ def offline():
         check("run_id 路径穿越防护", True)
 
 
+def offline_filters():
+    from refsearch import filters as flt
+    f = flt.normalize({"types": ["ugc", "tvc", "bogus"], "type_mode": "only", "keywords": "开学季 vlog",
+                       "exclude": ["合集"], "must": [], "min_duration": 10})
+    check("筛选：未知类型被忽略", f["types"] == ["ugc", "tvc"], f)
+    td = flt.type_dimension({"product": {"category": "电动牙刷", "search_en": "electric toothbrush"}}, f)
+    check("类型定向：附加词在前、带类型词", td["queries_zh"][0] == "电动牙刷 开学季"
+          and any("种草" in q for q in td["queries_zh"]) and any("TV commercial" in q for q in td["queries_en"]), td)
+    check("类型定向：每种语言不超过上限", len(td["queries_zh"]) <= flt.MAX_TYPE_QUERIES >= len(td["queries_en"]))
+    check("未选类型时不加定向维度", flt.type_dimension({"product": {}}, flt.normalize({})) is None)
+    check("标题兜底识别类型", [flt.guess_type({"title": t}) for t in
+                              ("某某牙刷 TVC 15s", "宿舍好物种草", "开箱测评", "Cannes Lions case film", "vlog")]
+          == ["tvc", "ugc", "review", "case", "other"])
+    check("硬筛选：排除词/时长", (flt.pre_filter({"title": "广告合集", "duration": 30}, f, 300),
+                              flt.pre_filter({"title": "x", "duration": 5}, f, 300),
+                              flt.pre_filter({"title": "x", "duration": 30}, f, 300)) == ("exclude", "duration", None))
+    check("类型筛选：only 模式丢弃其他类型", (flt.post_filter({"vtype": "review"}, f),
+                                            flt.post_filter({"vtype": "ugc"}, f)) == ("type", None))
+    check("旧结果无筛选字段时视为不筛选", flt.describe(flt.normalize(None)) == "")
+
+
 def probe(path):
     ff = config.ffmpeg_path()
     out = subprocess.run([ff, "-hide_banner", "-i", path], capture_output=True, text=True).stderr
@@ -248,6 +269,7 @@ def online(image):
 
 if __name__ == "__main__":
     offline()
+    offline_filters()
     if len(sys.argv) > 1:
         online(sys.argv[1])
     print(f"\n通过 {len(PASS)}，失败 {len(FAIL)}" + (f"：{FAIL}" if FAIL else ""))
