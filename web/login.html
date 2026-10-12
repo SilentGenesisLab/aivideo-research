@@ -8,114 +8,108 @@
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
-  :root { --bg:#f3f5f9; --card:#fff; --text:#1d2129; --muted:#6b7280; --line:#e5e7eb;
-          --accent:#2563eb; --accent-2:#4f46e5; --accent-soft:#eff4ff; --bad:#dc2626; --bad-soft:#fdecec; --input:#f8fafc; }
+  /* 配色：冷灰底 + 一个与图标一致的蓝色强调；不用渐变、光晕和装饰色块 */
+  :root { --bg:#f4f5f7; --panel:#ffffff; --ink:#16191f; --muted:#5f6672; --line:#dfe2e7; --field:#fbfbfc;
+          --accent:#2457d6; --accent-ink:#ffffff; --focus:rgba(36,87,214,.18); --bad:#b42318; --bad-bg:#fdf1f0; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#0e1015; --card:#1b1e24; --text:#e6e8eb; --muted:#9aa1ab; --line:#2c313a;
-            --accent:#6b9bff; --accent-2:#8b7cf6; --accent-soft:#1f2a40; --bad-soft:#3a1d1d; --input:#14171c; }
+    :root { --bg:#111317; --panel:#181b20; --ink:#e8eaed; --muted:#9aa1ab; --line:#2a2f37; --field:#14171b;
+            --accent:#5b86f0; --accent-ink:#0b0d10; --focus:rgba(91,134,240,.25); --bad:#f08b80; --bad-bg:#2a1714; }
   }
   * { box-sizing:border-box; }
   html, body { height:100%; }
-  body { margin:0; background:var(--bg); color:var(--text);
-         font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
-  .page { min-height:100%; display:grid; grid-template-columns:minmax(0,1.1fr) minmax(380px,.9fr); }
-  /* 左侧品牌区 */
-  .hero { position:relative; overflow:hidden; color:#fff; padding:56px 64px; display:flex; flex-direction:column;
-          background:linear-gradient(135deg,#2563eb 0%,#4f46e5 55%,#7c3aed 100%); }
-  .hero::before, .hero::after { content:""; position:absolute; border-radius:50%; background:rgba(255,255,255,.08); }
-  .hero::before { width:520px; height:520px; right:-160px; top:-140px; }
-  .hero::after { width:360px; height:360px; left:-120px; bottom:-120px; }
-  .brand { display:flex; align-items:center; gap:12px; position:relative; z-index:1; }
-  .brand img { width:44px; height:44px; border-radius:12px; box-shadow:0 6px 20px rgba(0,0,0,.18); }
-  .brand b { font-size:20px; letter-spacing:.02em; }
-  .hero h1 { position:relative; z-index:1; font-size:36px; line-height:1.3; margin:auto 0 16px; max-width:520px; }
-  .hero p.lead { position:relative; z-index:1; margin:0 0 32px; font-size:16px; opacity:.88; max-width:480px; }
-  .feats { position:relative; z-index:1; display:grid; gap:14px; margin-bottom:auto; max-width:480px; }
-  .feat { display:flex; gap:14px; align-items:flex-start; background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.16);
-          border-radius:14px; padding:14px 16px; backdrop-filter:blur(4px); }
-  .feat .ic { flex:none; width:36px; height:36px; border-radius:10px; background:rgba(255,255,255,.18);
-              display:flex; align-items:center; justify-content:center; }
-  .feat svg { width:20px; height:20px; stroke:#fff; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
-  .feat b { display:block; font-size:15px; } .feat span { font-size:13px; opacity:.82; }
-  .hero .foot { position:relative; z-index:1; font-size:12px; opacity:.7; margin-top:32px; }
-  /* 右侧表单 */
-  .side { display:flex; align-items:center; justify-content:center; padding:40px 24px; }
-  .card { width:100%; max-width:380px; }
-  .card h2 { font-size:26px; margin:0 0 6px; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif; }
+  .page { min-height:100%; max-width:1080px; margin:0 auto; padding:48px 32px;
+          display:grid; grid-template-columns:minmax(0,1fr) 400px; gap:72px; align-items:center; }
+  /* 左侧：品牌与一句话说明 */
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:56px; color:var(--ink); text-decoration:none; }
+  .brand img { width:32px; height:32px; border-radius:8px; }
+  .brand b { font-size:16px; font-weight:600; }
+  .intro h1 { text-wrap:balance; font-size:42px; line-height:1.22; font-weight:650; letter-spacing:-.01em; margin:0 0 18px; max-width:15em; }
+  .intro p { margin:0; color:var(--muted); font-size:16px; max-width:30em; }
+  .intro ul { list-style:none; padding:0; margin:36px 0 0; display:grid; gap:14px; max-width:34em; }
+  .intro li { display:grid; grid-template-columns:20px 1fr; gap:12px; align-items:start; color:var(--ink); }
+  .intro li svg { width:20px; height:20px; margin-top:2px; stroke:var(--accent); fill:none; stroke-width:1.7;
+                  stroke-linecap:round; stroke-linejoin:round; }
+  .intro li span { color:var(--muted); }
+  /* 右侧：取景框里的登录表单（取景器四角是本页唯一的装饰） */
+  .frame { position:relative; padding:14px; }
+  .frame i { position:absolute; width:22px; height:22px; border:0 solid var(--accent); }
+  .frame i:nth-child(1) { left:0; top:0; border-left-width:2px; border-top-width:2px; }
+  .frame i:nth-child(2) { right:0; top:0; border-right-width:2px; border-top-width:2px; }
+  .frame i:nth-child(3) { left:0; bottom:0; border-left-width:2px; border-bottom-width:2px; }
+  .frame i:nth-child(4) { right:0; bottom:0; border-right-width:2px; border-bottom-width:2px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:36px 32px 28px; }
+  .card h2 { font-size:22px; font-weight:650; margin:0 0 4px; }
   .card .sub { color:var(--muted); margin:0 0 28px; font-size:14px; }
-  label.f { display:block; font-size:13px; color:var(--muted); margin:0 0 6px; }
+  label.f { display:block; font-size:13px; font-weight:500; margin:0 0 6px; }
   .field { position:relative; margin-bottom:18px; }
-  .field svg.lead { position:absolute; left:14px; top:50%; transform:translateY(-50%); width:18px; height:18px;
-                    stroke:var(--muted); fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; pointer-events:none; }
-  .field input { width:100%; height:46px; padding:0 44px 0 42px; border-radius:10px; border:1px solid var(--line);
-                 background:var(--input); color:var(--text); font:inherit; outline:none; transition:border-color .15s, box-shadow .15s; }
-  .field input:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); background:var(--card); }
-  .eye { position:absolute; right:8px; top:50%; transform:translateY(-50%); width:32px; height:32px; border:0; background:none;
-         border-radius:8px; cursor:pointer; color:var(--muted); display:flex; align-items:center; justify-content:center; }
-  .eye:hover { background:var(--accent-soft); color:var(--accent); }
-  .eye svg { width:18px; height:18px; stroke:currentColor; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
-  .row { display:flex; justify-content:space-between; align-items:center; margin:-4px 0 22px; font-size:13px; color:var(--muted); }
-  .row label { display:flex; align-items:center; gap:7px; cursor:pointer; }
-  .row input { width:16px; height:16px; accent-color:var(--accent); }
-  button.go { width:100%; height:46px; border:0; border-radius:10px; color:#fff; font:600 15px/1 inherit; cursor:pointer;
-              background:linear-gradient(135deg,var(--accent),var(--accent-2)); box-shadow:0 8px 20px rgba(37,99,235,.25);
-              display:flex; align-items:center; justify-content:center; gap:8px; transition:transform .05s, opacity .15s; }
-  button.go:active { transform:translateY(1px); } button.go:disabled { opacity:.7; cursor:wait; }
-  .spin { width:16px; height:16px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; border-radius:50%;
+  .field input { width:100%; height:44px; padding:0 44px 0 12px; border-radius:8px; border:1px solid var(--line);
+                 background:var(--field); color:var(--ink); font:inherit; outline:none; }
+  .field input:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--focus); background:var(--panel); }
+  .eye { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:32px; height:32px; border:0; background:none;
+         border-radius:6px; cursor:pointer; color:var(--muted); display:flex; align-items:center; justify-content:center; }
+  .eye:hover { color:var(--ink); }
+  .eye:focus-visible, .row input:focus-visible, button.go:focus-visible, .links a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .eye svg { width:18px; height:18px; stroke:currentColor; fill:none; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
+  .row { display:flex; justify-content:space-between; align-items:center; margin:-2px 0 22px; font-size:13px; color:var(--muted); }
+  .row label { display:flex; align-items:center; gap:8px; cursor:pointer; }
+  .row input { width:16px; height:16px; accent-color:var(--accent); margin:0; }
+  #caps { color:var(--bad); }
+  button.go { width:100%; height:44px; border:0; border-radius:8px; background:var(--accent); color:var(--accent-ink);
+              font:600 15px/1 inherit; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; }
+  button.go:hover { filter:brightness(1.06); } button.go:disabled { opacity:.75; cursor:wait; }
+  .spin { width:16px; height:16px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%;
           animation:r .8s linear infinite; display:none; } button.go:disabled .spin { display:block; }
   @keyframes r { to { transform:rotate(360deg); } }
-  .err { display:none; align-items:center; gap:8px; background:var(--bad-soft); color:var(--bad); border-radius:10px;
-         padding:10px 12px; font-size:13px; margin-bottom:18px; } .err.on { display:flex; }
-  .links { margin-top:26px; padding-top:18px; border-top:1px solid var(--line); font-size:13px; color:var(--muted);
-           display:flex; justify-content:center; gap:18px; flex-wrap:wrap; }
-  .links a { color:var(--muted); text-decoration:none; } .links a:hover { color:var(--accent); }
-  .mbrand { display:none; }
+  @media (prefers-reduced-motion: reduce) { .spin { animation:none; } }
+  .err { display:none; background:var(--bad-bg); color:var(--bad); border-radius:8px; padding:10px 12px;
+         font-size:13px; margin-bottom:18px; } .err.on { display:block; }
+  .links { margin-top:22px; font-size:13px; color:var(--muted); display:flex; gap:20px; }
+  .links a { color:var(--muted); } .links a:hover { color:var(--accent); }
   @media (max-width:900px) {
-    .page { grid-template-columns:1fr; }
-    .hero { display:none; }
-    .side { align-items:flex-start; padding-top:12vh; }
-    .mbrand { display:flex; align-items:center; gap:10px; margin-bottom:28px; }
-    .mbrand img { width:40px; height:40px; border-radius:11px; } .mbrand b { font-size:18px; }
+    .page { grid-template-columns:1fr; gap:32px; padding:28px 16px 40px; align-items:start; }
+    .brand { margin-bottom:24px; }
+    .intro h1 { font-size:28px; margin-bottom:0; }
+    .intro p, .intro ul { display:none; }
+    .card { padding:28px 20px 22px; }
   }
 </style>
 </head>
 <body>
 <div class="page">
-  <section class="hero">
-    <div class="brand"><img src="/favicon.svg" alt=""><b>参考片检索</b></div>
+  <section class="intro">
+    <a class="brand" href="/login"><img src="/favicon.svg" alt=""><b>参考片检索</b></a>
     <h1>上传一张产品图，<br>找到值得参考的广告片</h1>
-    <p class="lead">AI 识别产品、拆解创意方向，在 16 个视频与广告案例平台中检索并打分，写清每条片子“参考什么”。</p>
-    <div class="feats">
-      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
-        <div><b>AI 识图拆词</b><span>产品画像 + 同品类、竞品、情绪、结构、获奖 5 个参考维度</span></div></div>
-      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="m10 8.5 4 2.5-4 2.5z"/></svg></span>
-        <div><b>16 个渠道并发检索</b><span>B 站、抖音、优酷、YouTube、数英、iSpot.tv 等，站内直接播放</span></div></div>
-      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></span>
-        <div><b>视频库与数据看板</b><span>历次结果统一检索，任务与接口调用情况一目了然</span></div></div>
-    </div>
-    <div class="foot">© 参考片检索 · videodata.sligenai.cn</div>
+    <p>AI 识别产品并拆解创意方向，在 16 个视频与广告案例平台中检索、打分，写清每条片子参考什么。</p>
+    <ul>
+      <li><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <div>识图拆词<br><span>产品画像，以及同品类、竞品、情绪、结构、获奖五个方向</span></div></li>
+      <li><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9.5 4 2.5-4 2.5z"/></svg>
+        <div>多平台检索<br><span>B 站、抖音、优酷、YouTube、数英、iSpot.tv 等，站内直接播放</span></div></li>
+      <li><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+        <div>视频库与数据看板<br><span>历次结果统一检索，任务和接口调用情况都能查</span></div></li>
+    </ul>
   </section>
 
-  <section class="side">
+  <section class="frame" aria-label="登录">
+    <i></i><i></i><i></i><i></i>
     <form class="card" id="form" autocomplete="on">
-      <div class="mbrand"><img src="/favicon.svg" alt=""><b>参考片检索</b></div>
-      <h2>欢迎登录</h2>
-      <p class="sub">请输入账号和密码进入系统</p>
+      <h2>登录</h2>
+      <p class="sub">使用管理员分配的账号登录</p>
       <div class="err" id="err" role="alert"></div>
       <label class="f" for="u">用户名</label>
       <div class="field">
-        <svg class="lead" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
-        <input id="u" name="username" autocomplete="username" required autofocus placeholder="请输入用户名">
+        <input id="u" name="username" autocomplete="username" required autofocus>
       </div>
       <label class="f" for="p">密码</label>
       <div class="field">
-        <svg class="lead" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-        <input id="p" name="password" type="password" autocomplete="current-password" required placeholder="请输入密码">
-        <button type="button" class="eye" id="eye" aria-label="显示密码" title="显示/隐藏密码">
+        <input id="p" name="password" type="password" autocomplete="current-password" required>
+        <button type="button" class="eye" id="eye" aria-label="显示密码" title="显示或隐藏密码">
           <svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
       </div>
-      <div class="row"><label><input type="checkbox" id="remember" checked> 30 天内自动登录</label><span id="caps"></span></div>
-      <button class="go" id="go" type="submit"><span class="spin"></span><span id="gotext">登 录</span></button>
+      <div class="row"><label><input type="checkbox" id="remember" checked> 30 天内保持登录</label><span id="caps"></span></div>
+      <button class="go" id="go" type="submit"><span class="spin"></span><span id="gotext">登录</span></button>
       <div class="links"><a href="/developer" target="_blank">接口文档</a><a href="/api/v1/docs" target="_blank">在线调试</a></div>
     </form>
   </section>
@@ -142,13 +136,13 @@ $("#form").onsubmit = async e => {
     const r = await fetch("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({username: $("#u").value.trim(), password: $("#p").value, remember: $("#remember").checked})});
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.detail || "登录失败，请稍后再试");
-    $("#gotext").textContent = "登录成功，正在进入…";
+    if (!r.ok) throw new Error(j.detail || "暂时无法登录，请稍后重试");
+    $("#gotext").textContent = "正在进入…";
     location.replace(next);
   } catch (err) {
     showErr(err.message);
     $("#p").select();
-    $("#go").disabled = false; $("#gotext").textContent = "登 录";
+    $("#go").disabled = false; $("#gotext").textContent = "登录";
   }
 };
 if (new URLSearchParams(location.search).get("expired")) showErr("登录已过期，请重新登录");
