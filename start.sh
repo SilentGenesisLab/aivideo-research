@@ -4,7 +4,9 @@
 #   ./stop.sh               停止
 cd "$(dirname "$0")"
 PORT="${1:-8770}"
-HOST="${HOST:-0.0.0.0}"   # 只经 nginx/HTTPS 访问时设 HOST=127.0.0.1，关闭 IP:端口 直连
+# 监听地址：优先环境变量，其次 .env 里的 HOST；经 nginx/HTTPS 访问时为 127.0.0.1（关闭 IP:端口 直连）
+HOST="${HOST:-$(grep -E '^HOST=' .env 2>/dev/null | cut -d= -f2)}"
+HOST="${HOST:-0.0.0.0}"
 [ -f server.pid ] && kill "$(cat server.pid)" 2>/dev/null
 nohup .venv/bin/python server.py --host "$HOST" --port "$PORT" >> server.log 2>&1 &
 echo $! > server.pid

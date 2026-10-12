@@ -69,7 +69,7 @@ sudo bash deploy/setup-https.sh videodata.sligenai.cn
 # 3. .env 设置对外地址（接口返回的链接、接入文档里的地址都用它）
 echo "PUBLIC_BASE_URL=https://videodata.sligenai.cn" >> .env
 # 4. 只允许经 HTTPS 访问，关闭 IP:8770 直连
-HOST=127.0.0.1 ./start.sh                      # Docker 部署：.env 里设 BIND_IP=127.0.0.1 后 docker compose up -d
+echo "HOST=127.0.0.1" >> .env && ./start.sh     # Docker 部署：.env 里设 BIND_IP=127.0.0.1 后 docker compose up -d
 ```
 
 证书续期由 certbot 的 systemd 定时器自动完成，可用 `sudo certbot renew --dry-run` 检查。
