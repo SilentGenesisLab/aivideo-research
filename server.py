@@ -31,7 +31,8 @@ APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 async def basic_auth(request: Request, call_next):
     # /api/v1 用 API Key 鉴权，/files 用签名校验，都不走网页登录
     path = request.url.path
-    public = path in ("/api/health", "/developer") or path.startswith(("/api/v1/", "/files/", "/developer/"))
+    public = (path in ("/api/health", "/developer", "/favicon.ico", "/favicon.svg", "/apple-touch-icon.png")
+              or path.startswith(("/api/v1/", "/files/", "/developer/")))
     if APP_PASSWORD and not public:
         ok = False
         auth = request.headers.get("authorization", "")
@@ -114,6 +115,13 @@ def developer_example(name: str):
     if name not in EXAMPLES:
         raise HTTPException(404, "示例不存在")
     return FileResponse(Path(__file__).parent / "examples" / name, media_type=f"{EXAMPLES[name]}; charset=utf-8")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+@app.get("/favicon.svg", include_in_schema=False)
+@app.get("/apple-touch-icon.png", include_in_schema=False)
+def favicon(request: Request):
+    return FileResponse(WEB / request.url.path.lstrip("/"), headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/dashboard", include_in_schema=False)

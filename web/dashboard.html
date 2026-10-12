@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>数据看板</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/layout.css?v=2">
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --text:#1d2129; --muted:#6b7280; --line:#e5e7eb;
           --accent:#2563eb; --accent-soft:#eff4ff; --ok:#16a34a; --ok-soft:#e8f7ee; --bad:#dc2626; --bad-soft:#fdecec;
@@ -16,16 +20,11 @@
   body { margin:0; background:var(--bg); color:var(--text); font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
   a { color:var(--accent); }
   .wrap { max-width:1240px; margin:0 auto; padding:20px 16px 80px; }
-  .top { display:flex; flex-wrap:wrap; align-items:center; gap:10px 20px; margin-bottom:14px; }
-  .top h1 { font-size:22px; margin:0; flex:1; }
-  .top a { font-size:13px; }
-  .tabs { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:16px; overflow-x:auto; }
-  .tabs button { background:none; border:0; border-bottom:2px solid transparent; color:var(--muted); padding:9px 16px;
-                 font-size:14px; cursor:pointer; white-space:nowrap; }
-  .tabs button.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  .top { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 14px; margin-bottom:16px; }
+  .top h1 { font-size:22px; margin:0; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:16px; min-width:0; }
   .card h3 { margin:0 0 12px; font-size:15px; }
-  .kpis { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:12px; margin-bottom:16px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:16px; }
   .kpi { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
   .kpi .l { color:var(--muted); font-size:12px; } .kpi .v { font-size:26px; font-weight:700; line-height:1.3; }
   .kpi .s { color:var(--muted); font-size:12px; }
@@ -66,7 +65,7 @@
   .chip.on { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
   /* 视频卡片 */
   .vgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:14px; }
-  .v { border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; background:var(--card); }
+  .vc { border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; background:var(--card); }
   .thumb { position:relative; aspect-ratio:16/9; background:#000; display:block; }
   .thumb img { width:100%; height:100%; object-fit:cover; }
   .badge { position:absolute; top:8px; left:8px; background:rgba(0,0,0,.7); color:#fff; padding:1px 8px; border-radius:10px; font-size:12px; }
@@ -84,17 +83,9 @@
 </style>
 </head>
 <body>
+<script src="/static/layout.js?v=1"></script>
 <div class="wrap">
-  <div class="top">
-    <h1>数据看板</h1>
-    <a href="/">← 返回检索</a><a href="/method" target="_blank">检索方法说明</a><a href="/developer" target="_blank">接口文档</a>
-  </div>
-  <div class="tabs" id="tabs">
-    <button data-tab="overview">概览</button>
-    <button data-tab="videos">视频库检索</button>
-    <button data-tab="tasks">任务日志</button>
-    <button data-tab="api">接口调用</button>
-  </div>
+  <div class="top"><h1 id="ptitle">数据看板</h1><span class="note" id="psub"></span></div>
 
   <!-- 概览 -->
   <section id="overview" class="hidden">
@@ -229,7 +220,7 @@ async function loadOverview() {
     o.recent_runs.map(r => `<tr><td>${esc(r.created)}</td><td>${esc(r.client)}</td>
       <td>${esc(r.product)}<div class="m">${esc(r.category)}</div></td><td><span class="m">${esc((r.brief || "").slice(0, 40))}</span></td>
       <td class="num">${r.kept}</td><td class="num">${r.sources.length}</td>
-      <td><a href="/#run=${encodeURIComponent(r.run_id)}" target="_blank">查看</a></td></tr>`));
+      <td style="white-space:nowrap"><a href="/#run=${encodeURIComponent(r.run_id)}" target="_blank">查看</a></td></tr>`));
 }
 
 // ---------- 视频库 ----------
@@ -244,13 +235,13 @@ async function loadVideos(append = false) {
   fillSelect($("#vclient"), r.clients);
   $("#vstat").textContent = `共 ${r.total} 条（同一视频出现在多次检索中只算一条）`;
   $("#vchips").innerHTML = r.platforms.map(([n, c]) => `<span class="chip ${vPlatform === n ? "on" : ""}" data-pf="${esc(n)}">${esc(n)} ${c}</span>`).join("");
-  const cards = r.items.map(v => `<div class="v">
+  const cards = r.items.map(v => `<div class="vc">
     <a class="thumb" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${playAttrs(v.url, v.title, v.platform, v.local)}>
       <img src="${esc(safeUrl(v.thumbnail))}" referrerpolicy="no-referrer" loading="lazy" alt=""><span class="play">▶</span>
       <span class="badge">${esc(v.platform)}${v.duration ? " · " + Math.floor(v.duration / 60) + ":" + String(v.duration % 60).padStart(2, "0") : ""}</span>
       <span class="badge score">${esc(v.score)}分</span>${v.local ? `<span class="badge dl">已下载</span>` : ""}</a>
     <div class="vb"><a class="vt" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${playAttrs(v.url, v.title, v.platform, v.local)}>${esc(v.title)}</a>
-      <div class="meta">${esc(v.channel || "")} · 播放 ${fmtViews(v.views)} · ${esc(v.dim_name)}</div>
+      <div class="meta">${esc([v.channel, v.views != null ? "播放 " + fmtViews(v.views) : "", v.dim_name].filter(Boolean).join(" · "))}</div>
       ${v.reference ? `<div class="ref">${esc(v.reference)}</div>` : ""}
       <div class="meta" style="margin-top:auto">来自：<a href="/#run=${encodeURIComponent(v.run_id)}" target="_blank">${esc(v.product || v.run_id)}</a> · ${esc(v.created.slice(0, 10))}</div>
     </div></div>`).join("");
@@ -290,7 +281,7 @@ async function loadTasks() {
       <td><span class="pill ${t.status}">${ST[t.status] || t.status}</span></td>
       <td class="num">${fmtDur(t.wait)}</td><td class="num">${fmtDur(t.duration)}</td><td>${esc(t.external_id || "")}</td>
       <td><span class="m" title="${esc(t.error || t.last)}">${esc((t.error || t.last || "").slice(0, 60))}</span></td>
-      <td>${t.run_id && t.status === "done" ? `<a href="/#run=${encodeURIComponent(t.run_id)}" target="_blank">结果</a>` : ""}</td></tr>`));
+      <td style="white-space:nowrap">${t.run_id && t.status === "done" ? `<a href="/#run=${encodeURIComponent(t.run_id)}" target="_blank">查看结果</a>` : ""}</td></tr>`));
   $("#tauto").textContent = active ? "有进行中的任务，每 5 秒自动刷新" : "";
   if (active && current === "tasks") tTimer = setTimeout(loadTasks, 5000);
 }
@@ -324,16 +315,22 @@ async function loadApi() {
 
 // ---------- 标签页 ----------
 const LOADERS = {overview: loadOverview, videos: () => loadVideos(), tasks: loadTasks, api: loadApi};
+const TITLES = {overview: ["数据看板", "检索量、来源分布、任务成功率与耗时"],
+                videos: ["视频库", "在历次检索找到的全部参考视频中搜索，点开即播放"],
+                tasks: ["任务日志", "每个检索、下载任务的调用方、排队与执行耗时、错误原因"],
+                api: ["接口调用", "对外接口 /api/v1 的调用量、错误率与调用明细"]};
 let current = null;
 function show(tab) {
   if (!LOADERS[tab]) tab = "overview";
   current = tab;
-  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  $("#ptitle").textContent = TITLES[tab][0];
+  $("#psub").textContent = TITLES[tab][1];
+  document.title = TITLES[tab][0] + " · 参考片检索";
   Object.keys(LOADERS).forEach(k => $("#" + k).classList.toggle("hidden", k !== tab));
   if (location.hash.slice(1) !== tab) history.replaceState(null, "", "#" + tab);
   LOADERS[tab]().catch(e => $("#" + tab).insertAdjacentHTML("afterbegin", `<div class="card" style="color:var(--bad)">加载失败：${esc(e.message)}</div>`));
 }
-$("#tabs").onclick = e => { const b = e.target.closest("[data-tab]"); if (b) show(b.dataset.tab); };
+window.addEventListener("hashchange", () => show(location.hash.slice(1)));  // 左侧菜单切换
 show(location.hash.slice(1));
 </script>
 </body>
