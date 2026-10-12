@@ -224,7 +224,7 @@ def task_log(limit: int = 200, client: str = "", kind: str = "", status: str = "
         who = t["meta"].get("client") or WEB
         if client and who != client or kind and t["kind"] != kind or status and t["status"] != status:
             continue
-        out.append({**t, "client": who, "wait": _secs(t["created"], t["started"]),
+        out.append({**t, "client": who,  # recent() 已去掉重试规格并算好 can_retry "wait": _secs(t["created"], t["started"]),
                     "duration": _secs(t["started"], t["finished"]),
                     "external_id": t["meta"].get("external_id"),
                     "platforms": len(t["meta"].get("platforms", []))})

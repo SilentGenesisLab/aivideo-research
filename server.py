@@ -263,6 +263,56 @@ class RerunReq(BaseModel):
     target_count: int | None = None  # 不传则沿用原目标数量；0 表示不设目标
 
 
+# ---------------- 检索 / 下载任务（提交与失败重试共用） ----------------
+def _search_job(spec: dict) -> str:
+    """spec：image（服务器上的图片路径）、brief、platforms、opts（run_search 参数）、title、meta、cleanup。"""
+    image = Path(spec["image"])
+    if not image.exists():
+        raise tasks.RetryError(410, "原图已被清理，请重新上传图片后检索")
+
+    def work(progress):
+        res = pipeline.run_search(str(image), spec["brief"], tuple(spec["platforms"]), progress=progress,
+                                  **spec["opts"])
+        if spec.get("cleanup"):  # 上传的临时图只在成功后删；失败时留着，供“重试”使用
+            image.unlink(missing_ok=True)
+        return res
+
+    return tasks.submit("search", spec["title"], work, dict(spec["meta"]), retry={**spec, "handler": "web_search"})
+
+
+def _download_job(spec: dict) -> str:
+    def work(progress):
+        latest = pipeline.load(spec["run_id"])  # 排队期间可能已有别的下载写入，取最新的
+        pipeline.download_into(latest, pipeline.find_videos(latest, spec["urls"]), spec["max_height"], progress)
+        return latest
+
+    return tasks.submit("download", spec["title"], work, {"run_id": spec["run_id"]},
+                        retry={**spec, "handler": "web_download"})
+
+
+tasks.register_retry("web_search", _search_job)
+tasks.register_retry("web_download", _download_job)
+
+
+def _clean_uploads(days: int = 7):
+    """失败任务留下的上传图（供重试）超过 7 天就删掉。"""
+    cutoff = time.time() - days * 86400
+    for f in UPLOADS.glob("*"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
+
+
+@app.post("/api/tasks/{jid}/retry")
+def retry_task(jid: str):
+    try:
+        return {"job_id": tasks.retry(jid)}
+    except tasks.RetryError as e:
+        raise HTTPException(e.status, str(e))
+
+
 @app.post("/api/rerun")
 def rerun(req: RerunReq):
     try:
@@ -278,15 +328,12 @@ def rerun(req: RerunReq):
     depth = req.depth or o.get("depth") or "standard"
     target = o.get("target_count") if req.target_count is None else (req.target_count or None)
 
-    def work(progress):
-        return pipeline.run_search(str(image), brief, pfs, filters=f, depth=depth, target_count=target,
-                                   min_score=o.get("min_score", 5), max_duration=o.get("max_duration", 300),
-                                   progress=progress)
-
     title = (old.get("analysis", {}).get("product", {}).get("name") or brief or req.run_id)[:40]
-    return {"job_id": tasks.submit("search", f"重新检索：{title}", work,
-                                   {"from_run": req.run_id, "image": f"/runs/{req.run_id}/{image.name}",
-                                    "platforms": list(pfs)})}
+    return {"job_id": _search_job({
+        "image": str(image), "brief": brief, "platforms": list(pfs), "cleanup": False, "title": f"重新检索：{title}",
+        "opts": {"filters": f, "depth": depth, "target_count": target,
+                 "min_score": o.get("min_score", 5), "max_duration": o.get("max_duration", 300)},
+        "meta": {"from_run": req.run_id, "image": f"/runs/{req.run_id}/{image.name}", "platforms": list(pfs)}})}
 
 
 @app.post("/api/search")
@@ -310,17 +357,13 @@ async def search(image: UploadFile = File(...), brief: str = Form(""),
     f = _filters(filters)
     min_score = min(max(min_score, 0), 10)
 
-    def work(progress):
-        try:
-            return pipeline.run_search(str(tmp), brief, pfs, per_query, max_duration,
-                                       min_score=min_score, download_mode=download_mode,
-                                       depth=depth, target_count=target_count,
-                                       download_top=download_top, filters=f, progress=progress)
-        finally:
-            tmp.unlink(missing_ok=True)
-
     title = brief.strip().splitlines()[0][:40] if brief.strip() else (image.filename or "产品图")
-    return {"job_id": tasks.submit("search", title, work, {"platforms": list(pfs)})}
+    return {"job_id": _search_job({
+        "image": str(tmp), "brief": brief, "platforms": list(pfs), "cleanup": True, "title": title,
+        "opts": {"per_query": per_query, "max_duration": max_duration, "min_score": min_score,
+                 "download_mode": download_mode, "download_top": download_top, "depth": depth,
+                 "target_count": target_count, "filters": f},
+        "meta": {"platforms": list(pfs)}})}
 
 
 class DownloadReq(BaseModel):
@@ -339,12 +382,8 @@ def download(req: DownloadReq):
     if not vids:
         raise HTTPException(400, "没有选中有效视频")
 
-    def work(progress):
-        latest = pipeline.load(req.run_id)  # 排队期间可能已有别的下载写入，取最新的
-        pipeline.download_into(latest, pipeline.find_videos(latest, req.urls), req.max_height, progress)
-        return latest
-
-    return {"job_id": tasks.submit("download", f"下载 {len(vids)} 条视频", work, {"run_id": req.run_id})}
+    return {"job_id": _download_job({"run_id": req.run_id, "urls": [v["url"] for v in vids],
+                                     "max_height": req.max_height, "title": f"下载 {len(vids)} 条视频"})}
 
 
 @app.get("/api/play")
@@ -391,7 +430,8 @@ def job(jid: str):
     t = tasks.get(jid)
     if not t:
         raise HTTPException(404, "任务不存在")
-    out = {**t, "ahead": tasks.position(t)}
+    out = {**{k: v for k, v in t.items() if k != "retry"}, "ahead": tasks.position(t),
+           "can_retry": t["status"] == "error" and not t.get("retried_by") and bool(t.get("retry"))}
     if t["status"] == "running" and t["kind"] == "search" and t["run_id"]:
         out["partial"] = pipeline.load_partial(t["run_id"])
     if t["status"] == "done" and t["kind"] != "relay" and t["run_id"]:
@@ -442,6 +482,7 @@ class SelectiveGZip:
 
 app.add_middleware(SelectiveGZip)
 downloader.backfill()
+_clean_uploads()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

@@ -23,19 +23,54 @@ _POOLS = {
 }
 _tasks: dict[str, dict] = {}
 _lock = threading.Lock()
+# 重试：任务提交时记下“怎么再提交一次”（retry 规格，可 JSON 序列化，服务重启后也能重试），
+# 由各入口注册处理函数 handler(spec) -> 新任务 ID
+_RETRY: dict[str, callable] = {}
+
+
+class RetryError(Exception):
+    def __init__(self, status: int, msg: str):
+        super().__init__(msg)
+        self.status = status
+
+
+def register_retry(name: str, fn) -> None:
+    _RETRY[name] = fn
+
+
+def retry(tid: str) -> str:
+    t = _tasks.get(tid)
+    if not t:
+        raise RetryError(404, "任务不存在")
+    if t["status"] != "error":
+        raise RetryError(400, "只有失败的任务可以重试")
+    if t.get("retried_by"):
+        raise RetryError(400, "这个任务已经重试过，请看新任务的结果")
+    spec = t.get("retry")
+    if not spec or spec.get("handler") not in _RETRY:
+        raise RetryError(400, "这个任务不支持重试，请重新提交")
+    new = _RETRY[spec["handler"]]({**spec, "retry_of": tid})
+    t["retried_by"] = new
+    _save(t)
+    return new
 
 
 def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+_save_lock = threading.Lock()
+
+
 def _save(t: dict) -> None:
     if t["kind"] == "relay":  # 播放中转只是临时任务，不落盘
         return
-    TASK_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = TASK_DIR / f"{t['id']}.json.tmp"
-    tmp.write_text(json.dumps(t, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(TASK_DIR / f"{t['id']}.json")
+    # 同一任务可能被两个线程同时写（如重试时请求线程记 retry_of、工作线程记开始运行），加锁避免临时文件互相覆盖
+    with _save_lock:
+        TASK_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = TASK_DIR / f"{t['id']}.json.tmp"
+        tmp.write_text(json.dumps(t, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(TASK_DIR / f"{t['id']}.json")
 
 
 def _restore() -> None:
@@ -49,18 +84,23 @@ def _restore() -> None:
         except (OSError, ValueError):
             continue
         if t.get("status") in ("queued", "running"):
-            t.update(status="error", error="服务重启，任务中断，请重新提交", finished=_now())
+            t.update(status="error", finished=_now(),
+                     error="服务重启，任务中断" + ("，可点“重试”" if t.get("retry") else "，请重新提交"))
             _save(t)
         _tasks[t["id"]] = t
 
 
-def submit(kind: str, title: str, fn, meta: dict | None = None, on_finish=None) -> str:
+def submit(kind: str, title: str, fn, meta: dict | None = None, on_finish=None, retry: dict | None = None) -> str:
     """fn(progress) 返回 dict；检索/下载任务的返回值里有 run_id，会记到任务上。
-    on_finish(task) 在任务结束（成功或失败）后调用，用于 Webhook 通知。"""
+    on_finish(task) 在任务结束（成功或失败）后调用，用于 Webhook 通知。
+    retry：失败后重试用的规格 {"handler": 注册名, ...}，见 register_retry。"""
     tid = uuid.uuid4().hex[:12]
+    if retry and retry.get("retry_of"):  # 由 retry() 提交：记下原任务，规格里不保留这个字段
+        meta = {**(meta or {}), "retry_of": retry["retry_of"]}
+        retry = {k: v for k, v in retry.items() if k != "retry_of"}
     t = {"id": tid, "kind": kind, "title": title, "status": "queued", "created": _now(), "seq": time.time_ns(),
          "started": None, "finished": None, "log": [], "error": None, "run_id": None, "pct": 0, "stage": "",
-         "result": None, "meta": meta or {}}
+         "result": None, "meta": meta or {}, "retry": retry}
     with _lock:
         _tasks[tid] = t
     _save(t)
@@ -87,9 +127,9 @@ def submit(kind: str, title: str, fn, meta: dict | None = None, on_finish=None) 
     progress.update = update  # 支持中间态的任务（检索）通过 getattr(progress, "update") 使用
 
     def run():
-        t.update(status="running", started=_now())
-        _save(t)
-        try:
+        try:  # 整个过程都在 try 里：任何异常都要把任务标成失败，不能停在“进行中”
+            t.update(status="running", started=_now())
+            _save(t)
             res = fn(progress) or {}
             t["run_id"] = res.get("run_id") or t["meta"].get("run_id")
             if kind == "relay":
@@ -126,8 +166,10 @@ def recent(limit: int = 50, client: str | None = None) -> list[dict]:
     items = [t for t in list(_tasks.values()) if t["kind"] != "relay"
              and (client is None or t["meta"].get("client") == client)]
     items.sort(key=lambda t: t.get("seq", 0), reverse=True)
-    return [{**{k: v for k, v in t.items() if k not in ("log", "result")},
-             "last": t["log"][-1] if t["log"] else "", "ahead": position(t)} for t in items[:limit]]
+    return [{**{k: v for k, v in t.items() if k not in ("log", "result", "retry")},
+             "last": t["log"][-1] if t["log"] else "", "ahead": position(t),
+             "can_retry": t["status"] == "error" and not t.get("retried_by") and bool(t.get("retry"))}
+            for t in items[:limit]]
 
 
 _restore()

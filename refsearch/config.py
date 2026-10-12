@@ -18,6 +18,13 @@ def _load_dotenv(path: Path) -> None:
 
 _load_dotenv(ROOT / ".env")
 
+# 时区：所有显示和记录的时间统一用东八区，不随服务器/容器时区变化。
+# 默认用 POSIX 写法 CST-8（不依赖系统装 tzdata，精简镜像里也生效）；可用 APP_TZ 改成别的，如 Asia/Tokyo
+import time as _time  # noqa: E402
+
+os.environ["TZ"] = os.environ.get("APP_TZ") or "CST-8"
+_time.tzset()
+
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 # deepseek-flash 支持图片输入；deepseek-v4-pro 只支持文本

@@ -131,6 +131,9 @@ class Task(BaseModel):
     error: str | None
     run_id: str | None = Field(description="检索/下载对应的结果 ID；检索任务开始运行后就有")
     result_url: str | None = Field(description="结果地址：GET /api/v1/runs/{run_id}")
+    can_retry: bool = Field(False, description="失败且还没重试过：可调用 POST /tasks/{task_id}/retry")
+    retry_of: str | None = Field(None, description="这是哪个失败任务的重试")
+    retried_by: str | None = Field(None, description="已被哪个新任务重试")
     partial_url: str | None = Field(None, description="检索进行中：中间结果地址 GET /api/v1/runs/{run_id}/partial")
     play_url: str | None = Field(None, description="仅 relay 任务：可直接播放的 mp4 地址")
     external_id: str | None = None
@@ -252,6 +255,8 @@ def task_out(t: dict, base: str) -> dict:
         "error": t["error"], "run_id": t["run_id"],
         "result_url": _abs(base, f"/api/v1/runs/{t['run_id']}") if t["run_id"] and t["status"] == "done" else None,
         "play_url": play, "external_id": t["meta"].get("external_id"),
+        "retry_of": t["meta"].get("retry_of"), "retried_by": t.get("retried_by"),
+        "can_retry": t["status"] == "error" and not t.get("retried_by") and bool(t.get("retry")),
         "percent": t.get("pct") or (100 if t["status"] == "done" else 0), "stage": t.get("stage") or "",
         "partial_url": _abs(base, f"/api/v1/runs/{t['run_id']}/partial")
         if t["kind"] == "search" and t["run_id"] and t["status"] == "running" else None,
@@ -355,23 +360,47 @@ def _sources(keys: list[str] | None) -> tuple:
 
 def _launch(image: Path, p: SearchCreate | RerunCreate, brief: str, pfs: tuple, who: str, base: str,
             title: str, cleanup: bool, opts: dict | None = None) -> dict:
-    opts = opts or {}
+    tid = _search_job({"image": str(image), "brief": brief, "platforms": list(pfs), "who": who,
+                       "external_id": p.external_id, "callback_url": p.callback_url, "base": base,
+                       "title": title, "cleanup": cleanup, "opts": opts or {}})
+    return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
+
+
+def _search_job(spec: dict) -> str:
+    """提交与失败重试共用。上传的临时图只在成功后删除，失败时留着供重试。"""
+    image, who, ext_id = Path(spec["image"]), spec["who"], spec["external_id"]
+    if not image.exists():
+        raise tasks.RetryError(410, "原图已被清理，请重新创建检索")
 
     def work(progress):
-        try:
-            res = pipeline.run_search(str(image), brief, pfs, progress=progress,
-                                      extra={"client": who, "external_id": p.external_id}, **opts)
-        finally:
-            if cleanup:
-                image.unlink(missing_ok=True)
-        res["client"], res["external_id"] = who, p.external_id
+        res = pipeline.run_search(str(image), spec["brief"], tuple(spec["platforms"]), progress=progress,
+                                  extra={"client": who, "external_id": ext_id}, **spec["opts"])
+        if spec.get("cleanup"):
+            image.unlink(missing_ok=True)
+        res["client"], res["external_id"] = who, ext_id
         pipeline.save(res)
         return res
 
-    tid = tasks.submit("search", title, work,
-                       {"client": who, "external_id": p.external_id, "platforms": list(pfs)},
-                       on_finish=_notifier(p.callback_url, base))
-    return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
+    return tasks.submit("search", spec["title"], work,
+                        {"client": who, "external_id": ext_id, "platforms": list(spec["platforms"])},
+                        on_finish=_notifier(spec["callback_url"], spec["base"]),
+                        retry={**spec, "handler": "api_search"})
+
+
+def _download_job(spec: dict) -> str:
+    def work(progress):
+        latest = pipeline.load(spec["run_id"])
+        pipeline.download_into(latest, pipeline.find_videos(latest, spec["urls"]), spec["max_height"], progress)
+        return latest
+
+    return tasks.submit("download", f"下载 {len(spec['urls'])} 条视频", work,
+                        {"client": spec["who"], "run_id": spec["run_id"], "external_id": spec["external_id"]},
+                        on_finish=_notifier(spec["callback_url"], spec["base"]),
+                        retry={**spec, "handler": "api_download"})
+
+
+tasks.register_retry("api_search", _search_job)
+tasks.register_retry("api_download", _download_job)
 
 
 def _save_upload(data: bytes, ext: str) -> Path:
@@ -473,6 +502,19 @@ def get_task(task_id: str, request: Request, who: str = Depends(client)):
     return task_out(t, _base(request))
 
 
+@router.post("/tasks/{task_id}/retry", response_model=TaskCreated, status_code=202, tags=["任务"],
+             summary="重试失败的任务（参数与原任务相同，生成新任务）")
+def retry_task(task_id: str, request: Request, who: str = Depends(client)):
+    t = tasks.get(task_id)
+    if not t or t["meta"].get("client") != who:
+        raise ApiError(404, "not_found", "任务不存在")
+    try:
+        tid = tasks.retry(task_id)
+    except tasks.RetryError as e:
+        raise ApiError(e.status, {400: "not_retryable", 404: "not_found", 410: "image_gone"}.get(e.status, "error"), str(e))
+    return {"task_id": tid, "status": "queued", "status_url": _abs(_base(request), f"/api/v1/tasks/{tid}")}
+
+
 @router.get("/tasks", response_model=list[Task], tags=["任务"], summary="最近的任务（最新在前）")
 def list_tasks(request: Request, limit: int = Query(20, ge=1, le=100), who: str = Depends(client)):
     base = _base(request)
@@ -565,17 +607,10 @@ def create_download(run_id: str, p: DownloadCreate, request: Request, who: str =
         raise ApiError(400, "invalid_request", "urls 与 top 至少传一个")
     if not vids:
         raise ApiError(400, "invalid_request", "没有匹配到结果中的视频")
-    urls = [v["url"] for v in vids]
-
-    def work(progress):
-        latest = pipeline.load(run_id)
-        pipeline.download_into(latest, pipeline.find_videos(latest, urls), p.max_height, progress)
-        return latest
-
     base = _base(request)
-    tid = tasks.submit("download", f"下载 {len(urls)} 条视频", work,
-                       {"client": who, "run_id": run_id, "external_id": r.get("external_id")},
-                       on_finish=_notifier(p.callback_url, base))
+    tid = _download_job({"run_id": run_id, "urls": [v["url"] for v in vids], "max_height": p.max_height,
+                         "who": who, "external_id": r.get("external_id"), "callback_url": p.callback_url,
+                         "base": base})
     return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
 
 

@@ -438,9 +438,12 @@ async function refreshTasks() {
         <div class="m" title="${esc(t.error || t.last)}">${esc(t.status === "error" ? t.error : t.status === "running" && t.stage ? `${t.stage} · ${t.pct}%` : t.last || (t.status === "queued" ? "等待空闲…" : ""))}</div>
         ${t.status === "running" && t.kind === "search" ? `<div class="pbar"><i style="width:${+t.pct || 0}%"></i></div>` : ""}</div>
       <div>${t.run_id && t.status === "done" ? `<button class="ghost" data-view="${esc(t.run_id)}">查看结果</button>`
-        : t.status === "running" && t.kind === "search" && t.id !== live.id ? `<button class="ghost" data-live="${esc(t.id)}">查看进度</button>` : ""}</div></div>`).join("")
+        : t.status === "running" && t.kind === "search" && t.id !== live.id ? `<button class="ghost" data-live="${esc(t.id)}">查看进度</button>`
+        : t.can_retry ? `<button class="ghost" data-retry="${esc(t.id)}" title="用相同的图片和参数重新执行">重试</button>`
+        : t.retried_by ? `<span class="m">已重试</span>` : ""}</div></div>`).join("")
     : `<span class="note">暂无任务。提交后可以继续上传下一张图，任务在后台排队执行。</span>`;
   $("#tasks").querySelectorAll("[data-view]").forEach(b => b.onclick = () => userView(b.dataset.view));
+  $("#tasks").querySelectorAll("[data-retry]").forEach(b => b.onclick = () => retryTask(b.dataset.retry, b));
   $("#tasks").querySelectorAll("[data-live]").forEach(b => b.onclick = () => {
     const t = list.find(x => x.id === b.dataset.live);
     follow = b.dataset.live; watch(follow, t ? t.title : ""); $("#out").scrollIntoView({behavior: "smooth"});
@@ -461,6 +464,22 @@ async function refreshTasks() {
   done.forEach(t => lastDone.add(t.id));
   tasksInit = true;
   taskTimer = setTimeout(refreshTasks, active.length ? 2000 : 15000);
+}
+
+async function retryTask(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(`/api/tasks/${encodeURIComponent(id)}/retry`, {method: "POST"});
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || "重试失败");
+    follow = j.job_id;
+    $("#log").textContent = "已重新加入任务队列";
+    watch(follow, "重试");
+  } catch (e) {
+    $("#log").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+    if (btn) btn.disabled = false;
+  }
+  refreshTasks();
 }
 
 function rerun(id) {
@@ -527,7 +546,12 @@ async function pollLive() {
   }
   if (t.status === "done" || t.status === "error") {
     live.id = null;
-    if (t.status === "error") { $("#log").innerHTML = `<span class="err">任务失败：${esc(t.title)}：${esc(t.error)}</span>`; rememberView({}); }
+    if (t.status === "error") {
+      $("#log").innerHTML = `<span class="err">任务失败：${esc(t.title)}：${esc(t.error)}</span>${
+        t.can_retry ? ` <button class="ghost" id="logretry" style="padding:3px 10px;font-size:12px">重试</button>` : ""}`;
+      if ($("#logretry")) $("#logretry").onclick = e => retryTask(t.id, e.target);
+      rememberView({});
+    }
     else {
       $("#log").textContent = `已完成：${t.title}`;
       if (t.kind === "search" && live.show) await viewRun(t.run_id, !live.shown);

@@ -133,6 +133,8 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 
 ## 5. 接口列表
 
+所有时间字段（`created_at`、`started_at`、`finished_at` 等）都是东八区（UTC+8），格式 `YYYY-MM-DD HH:MM:SS`。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/sources` | 检索渠道列表 |
@@ -141,6 +143,7 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | POST | `/api/v1/searches/upload` | 创建检索任务（multipart 上传图片） |
 | GET | `/api/v1/tasks/{task_id}` | 查询任务 |
 | GET | `/api/v1/tasks?limit=20` | 最近的任务 |
+| POST | `/api/v1/tasks/{task_id}/retry` | 重试失败的任务 |
 | GET | `/api/v1/runs/{run_id}` | 获取检索结果 |
 | GET | `/api/v1/runs/{run_id}/partial` | 检索进行中的中间结果（可提前渲染） |
 | GET | `/api/v1/runs?limit=20` | 历史检索 |
@@ -268,6 +271,9 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
   "run_id": "20261012-074744",
   "result_url": null,
   "partial_url": "https://<服务地址>/api/v1/runs/20261012-074744/partial",
+  "can_retry": false,
+  "retry_of": null,
+  "retried_by": null,
   "play_url": null,
   "external_id": "project-123"
 }
@@ -276,6 +282,14 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
 - `type`：`search` 检索 / `download` 下载 / `relay` 中转播放
 - `percent`：检索任务的进度 0~100。识别产品 0~15，多平台检索 15~55（按完成的检索次数），AI 打分 55~98（按完成的打分批次），完成为 100。`stage` 是当前阶段的文字说明，可直接显示在进度条旁。
 - 检索任务开始运行后 `run_id` 就有值；运行中 `partial_url` 指向中间结果（见 [5.5.1](#551-get-runsrun_idpartial中间结果)），成功后 `result_url` 有值。`relay` 任务成功后 `play_url` 有值。
+
+### 5.4.1 POST /tasks/{task_id}/retry（重试）
+
+失败的检索或下载任务（`can_retry: true`）可以用相同的图片和参数再执行一次，返回新任务，和创建检索一样是 `202 {"task_id", "status", "status_url"}`。Webhook 地址和 `external_id` 沿用原任务。
+
+- 新任务的 `retry_of` 是原任务 ID，原任务的 `retried_by` 是新任务 ID；每个失败任务只能重试一次（新任务再失败可以继续重试新任务）。
+- 错误码：`not_retryable`（任务没失败或已重试过）、`image_gone`（410，失败超过 7 天原图已清理，请重新创建）。
+- 服务重启导致中断的任务也可以重试。
 
 ### 5.5 GET /runs/{run_id}（结果）
 
@@ -563,6 +577,7 @@ def callback():
 | `API_KEYS` | 是 | 接入方与 Key，格式 `站点A:key1,站点B:key2`。生成 Key：`python3 -c "import secrets;print('sk_live_'+secrets.token_urlsafe(24))"` |
 | `WEBHOOK_SECRET` | 建议 | Webhook 签名密钥，提供给接入方用于验签 |
 | `PUBLIC_BASE_URL` | 建议 | 对外地址，如 `https://videodata.sligenai.cn`。经反向代理或 HTTPS 部署时必须配置，否则返回的链接地址不对 |
+| `APP_TZ` | 否 | 时区，默认 `CST-8`（东八区）。所有时间都按它记录和显示，不受服务器/容器时区影响 |
 | `SIGNING_SECRET` | 否 | 文件签名密钥；不配置时自动生成并保存在 `runs/.signing_secret` |
 | `FILE_URL_TTL` | 否 | 文件链接有效期（秒），默认 604800（7 天） |
 | `SEARCH_WORKERS` | 否 | 同时执行的检索数，默认 2 |

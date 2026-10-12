@@ -154,6 +154,10 @@ def online(image):
         t = wait(base, h, created["task_id"])
         print(f"     用时 {time.time() - t0:.0f}s，状态 {t['status']}")
         check("任务成功", t["status"] == "succeeded", t.get("error"))
+        r = requests.post(f"{base}/api/v1/tasks/{created['task_id']}/retry", headers=h)
+        check("成功的任务不能重试", r.status_code == 400 and r.json()["error"]["code"] == "not_retryable", r.text)
+        check("别的站点不能重试别人的任务",
+              requests.post(f"{base}/api/v1/tasks/{created['task_id']}/retry", headers=h2).status_code == 404)
         check("完成后进度 100 且不再给中间结果地址", t["percent"] == 100 and t["partial_url"] is None, t)
         check("任务带回 external_id 和结果地址", t["external_id"] == "order-123" and t["result_url"], t)
         run = requests.get(t["result_url"], headers=h).json()

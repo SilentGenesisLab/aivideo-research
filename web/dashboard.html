@@ -309,7 +309,15 @@ function renderTasks(all) {
       <td><span class="pill ${t.status}">${ST[t.status] || t.status}</span></td>
       <td class="num">${fmtDur(t.wait)}</td><td class="num">${fmtDur(t.duration)}</td><td>${esc(t.external_id || "")}</td>
       <td><span class="m" title="${esc(t.error || t.last)}">${esc((t.error || t.last || "").slice(0, 60))}</span></td>
-      <td style="white-space:nowrap">${t.run_id && t.status === "done" ? `<a href="/#run=${encodeURIComponent(t.run_id)}" target="_blank">查看结果</a>` : ""}</td></tr>`));
+      <td style="white-space:nowrap">${t.run_id && t.status === "done" ? `<a href="/#run=${encodeURIComponent(t.run_id)}" target="_blank">查看结果</a>`
+        : t.can_retry ? `<button class="btn" style="padding:3px 10px;font-size:12px" data-retry="${esc(t.id)}">重试</button>`
+        : t.retried_by ? `<span class="m">已重试</span>` : ""}</td></tr>`));
+  $("#ttable").querySelectorAll("[data-retry]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    const r = await fetch(`/api/tasks/${encodeURIComponent(b.dataset.retry)}/retry`, {method: "POST"});
+    if (!r.ok) { alert((await r.json()).detail || "重试失败"); b.disabled = false; return; }
+    loadTasks();
+  });
   $("#tauto").textContent = active ? "有进行中的任务，每 5 秒自动刷新" : "";
   return active;
 }
