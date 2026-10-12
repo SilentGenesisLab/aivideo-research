@@ -5,11 +5,13 @@ yt-dlp 自身的 socket 超时管不住，只能整体超时后结束进程。""
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import config
 
 TIMEOUT = 180  # 单条视频最长下载时间（秒）
+_TRANSIENT = ("No video formats found", "KeyError", "HTTP Error 412", "HTTP Error 429")
 
 
 def _safe(name: str, n: int = 60) -> str:
@@ -52,6 +54,12 @@ def download(videos: list[dict], out_dir: Path, max_height: int = 720,
         cmd.append(v["url"])
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            # B 站短时间请求多了会临时不给播放地址（No video formats / KeyError），稍等重试一次
+            if p.returncode != 0 and any(x in p.stderr for x in _TRANSIENT):
+                if on_progress:
+                    on_progress("平台临时限流，15 秒后重试…")
+                time.sleep(15)
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             for part in out_dir.glob(f"{stem}.*"):  # 清理半成品
                 part.unlink(missing_ok=True)

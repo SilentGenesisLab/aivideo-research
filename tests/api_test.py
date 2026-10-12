@@ -182,6 +182,13 @@ def online(image):
         check("参考平台作品", r.status_code == 200 and len(r.json()) >= 3, r.text[:200])
         r = requests.get(f"{base}/api/v1/reference-platforms/items", headers=h, params={"name": "小红书", "q": "x"})
         check("不支持的参考平台 404", r.status_code == 404 and r.json()["error"]["code"] == "not_found")
+        auth = ("admin", "web-pass-for-test")
+        usage = requests.get(f"{base}/api/admin/api-usage", auth=auth).json()
+        names = {c["client"] for c in usage["by_client"]}
+        check("接口调用日志按调用方记录", {"siteA", "siteB", "未带 Key", "无效 Key"} <= names, names)
+        check("接口调用日志记录路由模板", any(r["route"] == "GET /api/v1/tasks/{task_id}" for r in usage["by_route"]),
+              [r["route"] for r in usage["by_route"]])
+        check("接口调用日志统计错误", usage["errors"] >= 5, usage["errors"])
         u = wait(base, h2, up["task_id"])
         check("multipart 任务完成", u["status"] == "succeeded", u.get("error"))
     finally:

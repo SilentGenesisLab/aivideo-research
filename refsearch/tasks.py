@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from . import config
 
 TASK_DIR = config.RUNS_DIR / "_tasks"
-KEEP = 200  # 最多保留的任务记录数
+KEEP = 2000  # 最多保留的任务记录数（看板统计用）
 
 _POOLS = {
     "search": ThreadPoolExecutor(int(os.environ.get("SEARCH_WORKERS", "2")), thread_name_prefix="search"),

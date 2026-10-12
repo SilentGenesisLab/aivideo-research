@@ -171,6 +171,21 @@ def online(image):
         ids = {res["run_id"], *(o["run_id"] for o in others)}
         check("异步：每个任务结果目录独立", len(ids) == 3, ids)
 
+        # 数据看板
+        check("数据看板页面", requests.get(f"{base}/dashboard").status_code == 200)
+        check("共享播放器脚本", "playAttrs" in requests.get(f"{base}/static/player.js").text)
+        ov = requests.get(f"{base}/api/admin/overview").json()
+        check("看板概览统计", ov["kpi"]["runs_total"] >= 1 and len(ov["runs_per_day"]) == 30, ov["kpi"])
+        vs = requests.get(f"{base}/api/admin/videos", params={"min_score": 5, "limit": 5}).json()
+        check("视频库检索", vs["total"] > 0 and len(vs["items"]) <= 5 and vs["all_platforms"], vs.get("total"))
+        kw = vs["items"][0]["title"].split()[0]
+        vk = requests.get(f"{base}/api/admin/videos", params={"q": kw}).json()
+        check("视频库关键词检索", vk["total"] >= 1 and all(kw.lower() in (v["title"] + v["reference"] + v["channel"]
+              + v["product"] + v["brand"] + v["category"] + v["platform"]).lower() for v in vk["items"]), kw)
+        tl = requests.get(f"{base}/api/admin/tasks").json()
+        check("任务日志含本次检索", any(t["run_id"] == res["run_id"] and t["duration"] for t in tl))
+        check("接口调用统计", "by_client" in requests.get(f"{base}/api/admin/api-usage").json())
+
         # 站内播放
         r = requests.get(f"{base}/api/play", params={"url": "https://www.bilibili.com/video/BV1Bu4y1q7Yy"}).json()
         check("站内播放：B 站内嵌", r["kind"] == "iframe" and "player.bilibili.com" in r["src"], r)

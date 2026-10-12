@@ -17,7 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import api_v1
-from refsearch import config, pipeline, platforms, player, security, tasks
+import time
+
+from refsearch import config, pipeline, platforms, player, security, stats, tasks
 from refsearch.searchers import SOURCES
 
 app = FastAPI(title="参考视频检索", docs_url=None, redoc_url=None, openapi_url=None)  # 对外文档见 /api/v1/docs
@@ -46,6 +48,28 @@ async def basic_auth(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def api_log(request: Request, call_next):
+    """记录 /api/v1 每次调用（谁、哪个接口、状态码、耗时），供数据看板“接口调用”使用。"""
+    path = request.url.path
+    if not path.startswith("/api/v1/") or path.startswith(("/api/v1/docs", "/api/v1/openapi", "/api/v1/redoc")):
+        return await call_next(request)
+    t0 = time.time()
+    key = request.headers.get("x-api-key") or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    who = (security.client_of(key) if key else None) or ("无效 Key" if key else "未带 Key")
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        tpl = "/api/v1" + route.path if route is not None and hasattr(route, "path") else path
+        ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "")
+        stats.log_request(who, request.method, tpl, path, status, int((time.time() - t0) * 1000), ip)
+
+
+stats.init()
 WEB = Path(__file__).parent / "web"
 UPLOADS = config.RUNS_DIR / "_uploads"
 
@@ -90,6 +114,35 @@ def developer_example(name: str):
     if name not in EXAMPLES:
         raise HTTPException(404, "示例不存在")
     return FileResponse(Path(__file__).parent / "examples" / name, media_type=f"{EXAMPLES[name]}; charset=utf-8")
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard():
+    return FileResponse(WEB / "dashboard.html", headers=NO_CACHE)
+
+
+@app.get("/api/admin/overview")
+def admin_overview(days: int = 30):
+    return stats.overview(min(max(days, 7), 180))
+
+
+@app.get("/api/admin/videos")
+def admin_videos(q: str = "", platform: str = "", dim: str = "", min_score: float = 0, client: str = "",
+                 downloaded: bool = False, dedupe: bool = True, sort: str = "score",
+                 limit: int = 60, offset: int = 0):
+    return stats.search_videos(q, platform, dim, min_score, client, downloaded, dedupe, sort,
+                               min(max(limit, 1), 200), max(offset, 0))
+
+
+@app.get("/api/admin/tasks")
+def admin_tasks(client: str = "", kind: str = "", status: str = "", limit: int = 200):
+    return stats.task_log(min(max(limit, 1), 1000), client, kind, status)
+
+
+@app.get("/api/admin/api-usage")
+def admin_api_usage(days: int = 7, client: str = "", errors_only: bool = False, limit: int = 100):
+    return {**stats.api_usage(min(max(days, 1), 90)),
+            "recent": stats.recent_requests(min(max(limit, 1), 500), client, errors_only)}
 
 
 @app.get("/api/health")
@@ -250,6 +303,7 @@ def signed_file(path: str, exp: int = 0, sig: str = ""):
 
 
 app.mount("/api/v1", api_v1.api)
+app.mount("/static", StaticFiles(directory=WEB), name="static")
 app.mount("/runs", StaticFiles(directory=config.RUNS_DIR), name="runs")
 
 if __name__ == "__main__":

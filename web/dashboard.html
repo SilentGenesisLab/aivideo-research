@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据看板</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2129; --muted:#6b7280; --line:#e5e7eb;
+          --accent:#2563eb; --accent-soft:#eff4ff; --ok:#16a34a; --ok-soft:#e8f7ee; --bad:#dc2626; --bad-soft:#fdecec;
+          --warn:#d97706; --bar:#93b4f5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111317; --card:#1b1e24; --text:#e6e8eb; --muted:#9aa1ab; --line:#2c313a;
+            --accent:#6b9bff; --accent-soft:#1f2a40; --ok-soft:#173326; --bad-soft:#3a1d1d; --bar:#3d5f9e; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  a { color:var(--accent); }
+  .wrap { max-width:1240px; margin:0 auto; padding:20px 16px 80px; }
+  .top { display:flex; flex-wrap:wrap; align-items:center; gap:10px 20px; margin-bottom:14px; }
+  .top h1 { font-size:22px; margin:0; flex:1; }
+  .top a { font-size:13px; }
+  .tabs { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:16px; overflow-x:auto; }
+  .tabs button { background:none; border:0; border-bottom:2px solid transparent; color:var(--muted); padding:9px 16px;
+                 font-size:14px; cursor:pointer; white-space:nowrap; }
+  .tabs button.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:16px; min-width:0; }
+  .card h3 { margin:0 0 12px; font-size:15px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:12px; margin-bottom:16px; }
+  .kpi { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .kpi .l { color:var(--muted); font-size:12px; } .kpi .v { font-size:26px; font-weight:700; line-height:1.3; }
+  .kpi .s { color:var(--muted); font-size:12px; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:16px; }
+  .grid2 .card { margin-bottom:0; } .grid2 + .grid2, .grid2 + .card { margin-top:16px; }
+  @media (max-width:420px) { .grid2 { grid-template-columns:1fr; } }
+  /* 柱状图 */
+  .vbars { display:flex; align-items:flex-end; gap:3px; height:160px; padding-top:8px; }
+  .vbars .b { flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; height:100%; min-width:0; }
+  .vbars .b i { display:block; width:100%; background:var(--bar); border-radius:3px 3px 0 0; min-height:1px; }
+  .vbars .b:hover i { background:var(--accent); }
+  .vbars .b span { font-size:10px; color:var(--muted); height:14px; }
+  .vaxis { display:flex; justify-content:space-between; color:var(--muted); font-size:11px; margin-top:4px; }
+  .hbars { display:flex; flex-direction:column; gap:6px; }
+  .hbars .r { display:grid; grid-template-columns:minmax(80px,140px) 1fr 44px; gap:8px; align-items:center; font-size:13px; }
+  .hbars .r .n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hbars .r .t { background:var(--bg); border-radius:4px; height:14px; overflow:hidden; }
+  .hbars .r .t i { display:block; height:100%; background:var(--bar); border-radius:4px; }
+  .hbars .r .c { text-align:right; color:var(--muted); }
+  /* 表格 */
+  .tbl { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; white-space:nowrap; position:sticky; top:0; background:var(--card); }
+  td.num, th.num { text-align:right; white-space:nowrap; }
+  td .m { color:var(--muted); font-size:12px; }
+  .pill { display:inline-block; font-size:12px; padding:0 8px; border-radius:10px; white-space:nowrap; background:var(--accent-soft); color:var(--accent); }
+  .pill.done, .pill.ok { background:var(--ok-soft); color:var(--ok); } .pill.error, .pill.bad { background:var(--bad-soft); color:var(--bad); }
+  .pill.queued { background:var(--bg); color:var(--muted); }
+  /* 筛选 */
+  .filters { display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center; margin-bottom:12px; }
+  .filters input[type=search] { flex:1; min-width:200px; }
+  input, select { padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text); font:inherit; }
+  button.btn { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:7px 16px; cursor:pointer; font:inherit; }
+  button.ghost { background:none; color:var(--accent); border:1px solid var(--accent); border-radius:8px; padding:6px 14px; cursor:pointer; font:inherit; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+  .chip { border:1px solid var(--line); border-radius:14px; padding:2px 10px; font-size:12px; cursor:pointer; background:var(--card); color:var(--text); }
+  .chip.on { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
+  /* 视频卡片 */
+  .vgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:14px; }
+  .v { border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; background:var(--card); }
+  .thumb { position:relative; aspect-ratio:16/9; background:#000; display:block; }
+  .thumb img { width:100%; height:100%; object-fit:cover; }
+  .badge { position:absolute; top:8px; left:8px; background:rgba(0,0,0,.7); color:#fff; padding:1px 8px; border-radius:10px; font-size:12px; }
+  .badge.score { left:auto; right:8px; background:var(--accent); }
+  .badge.dl { top:auto; bottom:8px; background:var(--ok); }
+  .vb { padding:10px 12px; display:flex; flex-direction:column; gap:4px; flex:1; font-size:13px; }
+  .vt { font-weight:600; color:var(--text); text-decoration:none; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .vt:hover { color:var(--accent); }
+  .ref { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+  .ref::before { content:"参考："; color:var(--accent); font-weight:600; }
+  .note, .meta { color:var(--muted); font-size:12px; }
+  .more { text-align:center; margin-top:16px; }
+  .hidden { display:none !important; }
+  .empty { color:var(--muted); padding:30px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>数据看板</h1>
+    <a href="/">← 返回检索</a><a href="/method" target="_blank">检索方法说明</a><a href="/developer" target="_blank">接口文档</a>
+  </div>
+  <div class="tabs" id="tabs">
+    <button data-tab="overview">概览</button>
+    <button data-tab="videos">视频库检索</button>
+    <button data-tab="tasks">任务日志</button>
+    <button data-tab="api">接口调用</button>
+  </div>
+
+  <!-- 概览 -->
+  <section id="overview" class="hidden">
+    <div class="kpis" id="kpis"></div>
+    <div class="card"><h3>近 30 天检索量</h3><div id="perday"></div></div>
+    <div class="grid2">
+      <div class="card"><h3>参考视频来源（去重）</h3><div id="byplatform"></div></div>
+      <div class="card"><h3>调用方（检索次数）</h3><div id="byclient"></div></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>产品品类 Top 10</h3><div id="bycategory"></div></div>
+      <div class="card"><h3>AI 评分分布（去重视频）</h3><div id="scorehist"></div></div>
+    </div>
+    <div class="card"><h3>最近检索</h3><div class="tbl" id="recentruns"></div></div>
+  </section>
+
+  <!-- 视频库 -->
+  <section id="videos" class="hidden">
+    <div class="card">
+      <div class="filters">
+        <input type="search" id="vq" placeholder="搜索标题、参考点、品牌、品类、频道，空格分隔多个词">
+        <select id="vplatform"><option value="">全部来源</option></select>
+        <select id="vdim"><option value="">全部维度</option><option value="category">同品类</option>
+          <option value="competitor">竞品</option><option value="emotion">情绪主题</option>
+          <option value="structure">结构形式</option><option value="award">获奖标杆</option></select>
+        <select id="vscore"><option value="0">全部评分</option><option value="7">≥ 7 分</option>
+          <option value="8" selected>≥ 8 分</option><option value="9">≥ 9 分</option></select>
+        <select id="vclient"><option value="">全部调用方</option></select>
+        <select id="vsort"><option value="score">按评分</option><option value="new">按时间</option><option value="views">按播放量</option></select>
+        <label class="note"><input type="checkbox" id="vdl"> 只看已下载</label>
+        <button class="btn" id="vgo">搜索</button>
+      </div>
+      <div class="note" id="vstat"></div>
+    </div>
+    <div class="chips" id="vchips"></div>
+    <div class="vgrid" id="vgrid"></div>
+    <div class="more"><button class="ghost hidden" id="vmore">加载更多</button></div>
+  </section>
+
+  <!-- 任务日志 -->
+  <section id="tasks" class="hidden">
+    <div class="kpis" id="tkpis"></div>
+    <div class="card">
+      <div class="filters">
+        <select id="tclient"><option value="">全部调用方</option></select>
+        <select id="tkind"><option value="">全部类型</option><option value="search">检索</option><option value="download">下载</option></select>
+        <select id="tstatus"><option value="">全部状态</option><option value="queued">排队中</option>
+          <option value="running">进行中</option><option value="done">已完成</option><option value="error">失败</option></select>
+        <span class="note" id="tauto"></span>
+      </div>
+      <div class="tbl" id="ttable"></div>
+    </div>
+  </section>
+
+  <!-- 接口调用 -->
+  <section id="api" class="hidden">
+    <div class="filters">
+      <select id="adays"><option value="1">今天起 24 小时</option><option value="7" selected>近 7 天</option><option value="30">近 30 天</option><option value="90">近 90 天</option></select>
+      <span class="note">统计对外接口 /api/v1 的每次调用（不含网页操作），按 API Key 区分调用方</span>
+    </div>
+    <div class="kpis" id="akpis"></div>
+    <div class="card"><h3>每日调用量</h3><div id="aperday"></div></div>
+    <div class="grid2">
+      <div class="card"><h3>按调用方</h3><div class="tbl" id="aclient"></div></div>
+      <div class="card"><h3>按接口</h3><div class="tbl" id="aroute"></div></div>
+    </div>
+    <div class="card">
+      <div style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin-bottom:10px">
+        <h3 style="margin:0;flex:1">最近调用</h3>
+        <select id="arclient"><option value="">全部调用方</option></select>
+        <label class="note"><input type="checkbox" id="arerr"> 只看错误</label>
+      </div>
+      <div class="tbl" id="arecent"></div>
+    </div>
+  </section>
+</div>
+
+<script src="/static/player.js?v=2"></script>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const safeUrl = u => /^https?:\/\//i.test(u || "") ? u : "#";
+const get = async url => { const r = await fetch(url, {cache: "no-store"}); if (!r.ok) throw new Error(r.status); return r.json(); };
+const fmtDur = s => s == null ? "-" : s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, "0")}s`;
+const fmtViews = n => n == null ? "-" : n >= 1e8 ? (n / 1e8).toFixed(1) + "亿" : n >= 1e4 ? (n / 1e4).toFixed(1) + "万" : n;
+const ST = {queued: "排队中", running: "进行中", done: "已完成", error: "失败"};
+const KIND = {search: "检索", download: "下载"};
+
+function kpis(el, items) {
+  el.innerHTML = items.map(([l, v, s]) => `<div class="kpi"><div class="l">${esc(l)}</div><div class="v">${esc(v ?? "-")}</div><div class="s">${esc(s || "")}</div></div>`).join("");
+}
+function vbars(el, rows, key = "count") {
+  const max = Math.max(1, ...rows.map(r => r[key]));
+  el.innerHTML = `<div class="vbars">${rows.map(r => `<div class="b" title="${esc(r.day)}：${r[key]}">
+      <span>${r[key] || ""}</span><i style="height:${(r[key] / max * 100).toFixed(1)}%"></i></div>`).join("")}</div>
+    <div class="vaxis"><span>${esc(rows[0]?.day || "")}</span><span>${esc(rows[rows.length - 1]?.day || "")}</span></div>`;
+}
+function hbars(el, pairs) {
+  if (!pairs.length) return el.innerHTML = `<div class="empty">暂无数据</div>`;
+  const max = Math.max(1, ...pairs.map(p => p[1]));
+  el.innerHTML = `<div class="hbars">${pairs.map(([n, c]) => `<div class="r"><span class="n" title="${esc(n)}">${esc(n)}</span>
+    <span class="t"><i style="width:${(c / max * 100).toFixed(1)}%"></i></span><span class="c">${c}</span></div>`).join("")}</div>`;
+}
+function table(el, head, rows) {
+  el.innerHTML = rows.length ? `<table><tr>${head.map(h => `<th class="${h[1] || ""}">${esc(h[0])}</th>`).join("")}</tr>${rows.join("")}</table>`
+                             : `<div class="empty">暂无数据</div>`;
+}
+function fillSelect(sel, values) {
+  const cur = sel.value, first = sel.options[0].outerHTML;
+  sel.innerHTML = first + values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+  if (values.includes(cur)) sel.value = cur;
+}
+
+// ---------- 概览 ----------
+async function loadOverview() {
+  const o = await get("/api/admin/overview"), k = o.kpi;
+  kpis($("#kpis"), [
+    ["检索总数", k.runs_total, `今日 ${k.runs_today} · 近 7 天 ${k.runs_7d}`],
+    ["参考视频（去重）", k.videos_unique, `其中广告正片 ${k.videos_ad}`],
+    ["平均每次保留", k.avg_kept, "条参考片"],
+    ["已下载视频", k.videos_downloaded, ""],
+    ["任务成功率", k.task_success_rate == null ? "-" : k.task_success_rate + "%", `进行中/排队 ${k.tasks_active}`],
+    ["平均检索耗时", fmtDur(k.task_avg_seconds), `平均排队 ${fmtDur(k.task_avg_wait)}`],
+    ["接口调用", k.api_calls_today, `今日 · 近 7 天 ${k.api_calls_7d}，错误 ${k.api_errors_7d}`],
+  ]);
+  vbars($("#perday"), o.runs_per_day);
+  hbars($("#byplatform"), o.by_platform);
+  hbars($("#byclient"), o.by_client);
+  hbars($("#bycategory"), o.by_category);
+  hbars($("#scorehist"), o.score_hist.map(r => [r.score + " 分", r.count]));
+  table($("#recentruns"), [["时间"], ["调用方"], ["产品"], ["简报"], ["保留", "num"], ["来源数", "num"], [""]],
+    o.recent_runs.map(r => `<tr><td>${esc(r.created)}</td><td>${esc(r.client)}</td>
+      <td>${esc(r.product)}<div class="m">${esc(r.category)}</div></td><td><span class="m">${esc((r.brief || "").slice(0, 40))}</span></td>
+      <td class="num">${r.kept}</td><td class="num">${r.sources.length}</td>
+      <td><a href="/#run=${encodeURIComponent(r.run_id)}" target="_blank">查看</a></td></tr>`));
+}
+
+// ---------- 视频库 ----------
+let vOffset = 0, vPlatform = "";
+async function loadVideos(append = false) {
+  if (!append) { vOffset = 0; }
+  const p = new URLSearchParams({q: $("#vq").value.trim(), platform: vPlatform || $("#vplatform").value,
+    dim: $("#vdim").value, min_score: $("#vscore").value, client: $("#vclient").value,
+    downloaded: $("#vdl").checked, sort: $("#vsort").value, limit: 60, offset: vOffset});
+  const r = await get("/api/admin/videos?" + p);
+  fillSelect($("#vplatform"), r.all_platforms);
+  fillSelect($("#vclient"), r.clients);
+  $("#vstat").textContent = `共 ${r.total} 条（同一视频出现在多次检索中只算一条）`;
+  $("#vchips").innerHTML = r.platforms.map(([n, c]) => `<span class="chip ${vPlatform === n ? "on" : ""}" data-pf="${esc(n)}">${esc(n)} ${c}</span>`).join("");
+  const cards = r.items.map(v => `<div class="v">
+    <a class="thumb" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${playAttrs(v.url, v.title, v.platform, v.local)}>
+      <img src="${esc(safeUrl(v.thumbnail))}" referrerpolicy="no-referrer" loading="lazy" alt=""><span class="play">▶</span>
+      <span class="badge">${esc(v.platform)}${v.duration ? " · " + Math.floor(v.duration / 60) + ":" + String(v.duration % 60).padStart(2, "0") : ""}</span>
+      <span class="badge score">${esc(v.score)}分</span>${v.local ? `<span class="badge dl">已下载</span>` : ""}</a>
+    <div class="vb"><a class="vt" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${playAttrs(v.url, v.title, v.platform, v.local)}>${esc(v.title)}</a>
+      <div class="meta">${esc(v.channel || "")} · 播放 ${fmtViews(v.views)} · ${esc(v.dim_name)}</div>
+      ${v.reference ? `<div class="ref">${esc(v.reference)}</div>` : ""}
+      <div class="meta" style="margin-top:auto">来自：<a href="/#run=${encodeURIComponent(v.run_id)}" target="_blank">${esc(v.product || v.run_id)}</a> · ${esc(v.created.slice(0, 10))}</div>
+    </div></div>`).join("");
+  $("#vgrid").innerHTML = append ? $("#vgrid").innerHTML + cards : (cards || `<div class="empty">没有符合条件的视频</div>`);
+  vOffset += r.items.length;
+  $("#vmore").classList.toggle("hidden", vOffset >= r.total);
+}
+$("#vgo").onclick = () => loadVideos();
+$("#vq").onkeydown = e => { if (e.key === "Enter") loadVideos(); };
+["#vplatform", "#vdim", "#vscore", "#vclient", "#vsort", "#vdl"].forEach(s => $(s).onchange = () => { vPlatform = ""; loadVideos(); });
+$("#vmore").onclick = () => loadVideos(true);
+$("#vchips").onclick = e => {
+  const c = e.target.closest("[data-pf]"); if (!c) return;
+  vPlatform = vPlatform === c.dataset.pf ? "" : c.dataset.pf; $("#vplatform").value = ""; loadVideos();
+};
+
+// ---------- 任务日志 ----------
+let tTimer = null;
+async function loadTasks() {
+  clearTimeout(tTimer);
+  const p = new URLSearchParams({client: $("#tclient").value, kind: $("#tkind").value, status: $("#tstatus").value, limit: 300});
+  const [list, all] = await Promise.all([get("/api/admin/tasks?" + p), get("/api/admin/tasks?limit=1000")]);
+  fillSelect($("#tclient"), [...new Set(all.map(t => t.client))]);
+  const done = all.filter(t => t.status === "done"), fin = all.filter(t => t.status === "done" || t.status === "error");
+  const durs = done.filter(t => t.kind === "search" && t.duration).map(t => t.duration);
+  const active = all.filter(t => t.status === "queued" || t.status === "running").length;
+  kpis($("#tkpis"), [
+    ["任务总数", all.length, `检索 ${all.filter(t => t.kind === "search").length} · 下载 ${all.filter(t => t.kind === "download").length}`],
+    ["进行中 / 排队", active, ""],
+    ["成功率", fin.length ? (100 * done.length / fin.length).toFixed(1) + "%" : "-", `失败 ${fin.length - done.length}`],
+    ["检索平均耗时", durs.length ? fmtDur(durs.reduce((a, b) => a + b, 0) / durs.length) : "-",
+     durs.length ? `最长 ${fmtDur(Math.max(...durs))}` : ""],
+  ]);
+  table($("#ttable"), [["提交时间"], ["调用方"], ["类型"], ["标题"], ["状态"], ["排队", "num"], ["耗时", "num"], ["业务 ID"], ["进度 / 错误"], [""]],
+    list.map(t => `<tr><td style="white-space:nowrap">${esc(t.created)}</td><td>${esc(t.client)}</td><td>${esc(KIND[t.kind] || t.kind)}</td>
+      <td>${esc(t.title)}${t.platforms ? `<div class="m">${t.platforms} 个渠道</div>` : ""}</td>
+      <td><span class="pill ${t.status}">${ST[t.status] || t.status}</span></td>
+      <td class="num">${fmtDur(t.wait)}</td><td class="num">${fmtDur(t.duration)}</td><td>${esc(t.external_id || "")}</td>
+      <td><span class="m" title="${esc(t.error || t.last)}">${esc((t.error || t.last || "").slice(0, 60))}</span></td>
+      <td>${t.run_id && t.status === "done" ? `<a href="/#run=${encodeURIComponent(t.run_id)}" target="_blank">结果</a>` : ""}</td></tr>`));
+  $("#tauto").textContent = active ? "有进行中的任务，每 5 秒自动刷新" : "";
+  if (active && current === "tasks") tTimer = setTimeout(loadTasks, 5000);
+}
+["#tclient", "#tkind", "#tstatus"].forEach(s => $(s).onchange = loadTasks);
+
+// ---------- 接口调用 ----------
+async function loadApi() {
+  const p = new URLSearchParams({days: $("#adays").value, client: $("#arclient").value, errors_only: $("#arerr").checked, limit: 200});
+  const u = await get("/api/admin/api-usage?" + p);
+  fillSelect($("#arclient"), u.by_client.map(c => c.client));
+  const avg = u.by_client.length ? Math.round(u.by_client.reduce((a, c) => a + c.avg_ms * c.calls, 0) / Math.max(1, u.total)) : null;
+  kpis($("#akpis"), [
+    ["调用次数", u.total, `近 ${u.days} 天`],
+    ["错误次数", u.errors, u.total ? `错误率 ${(100 * u.errors / u.total).toFixed(1)}%` : ""],
+    ["调用方", u.by_client.length, "个"],
+    ["平均响应", avg == null ? "-" : avg + " ms", "不含任务执行时间"],
+  ]);
+  vbars($("#aperday"), u.per_day);
+  table($("#aclient"), [["调用方"], ["调用", "num"], ["错误", "num"], ["平均耗时", "num"], ["最近调用"]],
+    u.by_client.map(c => `<tr><td>${esc(c.client)}</td><td class="num">${c.calls}</td><td class="num">${c.errors || 0}</td>
+      <td class="num">${c.avg_ms} ms</td><td style="white-space:nowrap">${esc(c.last)}</td></tr>`));
+  table($("#aroute"), [["接口"], ["调用", "num"], ["错误", "num"], ["平均耗时", "num"]],
+    u.by_route.map(r => `<tr><td><code>${esc(r.route)}</code></td><td class="num">${r.calls}</td><td class="num">${r.errors || 0}</td><td class="num">${r.avg_ms} ms</td></tr>`));
+  table($("#arecent"), [["时间"], ["调用方"], ["请求"], ["状态", "num"], ["耗时", "num"], ["IP"]],
+    u.recent.map(r => `<tr><td style="white-space:nowrap">${esc(r.time)}</td><td>${esc(r.client)}</td>
+      <td><code>${esc(r.method)} ${esc(r.path)}</code></td>
+      <td class="num"><span class="pill ${r.status >= 400 ? "bad" : "ok"}">${r.status}</span></td>
+      <td class="num">${r.ms} ms</td><td>${esc(r.ip)}</td></tr>`));
+}
+["#adays", "#arclient", "#arerr"].forEach(s => $(s).onchange = loadApi);
+
+// ---------- 标签页 ----------
+const LOADERS = {overview: loadOverview, videos: () => loadVideos(), tasks: loadTasks, api: loadApi};
+let current = null;
+function show(tab) {
+  if (!LOADERS[tab]) tab = "overview";
+  current = tab;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  Object.keys(LOADERS).forEach(k => $("#" + k).classList.toggle("hidden", k !== tab));
+  if (location.hash.slice(1) !== tab) history.replaceState(null, "", "#" + tab);
+  LOADERS[tab]().catch(e => $("#" + tab).insertAdjacentHTML("afterbegin", `<div class="card" style="color:var(--bad)">加载失败：${esc(e.message)}</div>`));
+}
+$("#tabs").onclick = e => { const b = e.target.closest("[data-tab]"); if (b) show(b.dataset.tab); };
+show(location.hash.slice(1));
+</script>
+</body>
+</html>

@@ -81,23 +81,6 @@
   .task .m { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .task button { padding:4px 10px; font-size:12px; }
   .hidden { display:none !important; } .err { color:var(--bad); } .note { color:var(--muted); font-size:12px; }
-  .thumb .play { position:absolute; inset:0; margin:auto; width:46px; height:46px; border-radius:50%;
-                 background:rgba(0,0,0,.55); color:#fff; display:flex; align-items:center; justify-content:center;
-                 font-size:18px; opacity:.85; pointer-events:none; }
-  .thumb:hover .play { opacity:1; background:var(--accent); }
-  .modal { position:fixed; inset:0; background:rgba(0,0,0,.78); z-index:50; display:flex;
-           align-items:center; justify-content:center; padding:16px; }
-  .mbox { background:var(--card); border-radius:12px; width:min(1000px,100%); max-height:100%;
-          display:flex; flex-direction:column; overflow:hidden; }
-  .mhead { display:flex; gap:10px; align-items:center; padding:10px 14px; border-bottom:1px solid var(--line); }
-  .mhead .t { flex:1; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .mhead button { padding:5px 10px; font-size:12px; }
-  .stage { background:#000; aspect-ratio:16/9; width:100%; display:flex; align-items:center; justify-content:center;
-           color:#ccc; max-height:calc(100vh - 140px); }
-  .stage.tall { aspect-ratio:auto; height:min(78vh,760px); }
-  .stage iframe, .stage video, .stage img { width:100%; height:100%; border:0; object-fit:contain; }
-  .mfoot { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; padding:10px 14px; font-size:12px; color:var(--muted); }
-  .mfoot .sp { flex:1; }
   .pfrow { border-top:1px solid var(--line); padding:12px 0; }
   .pfrow:first-of-type { border-top:0; }
   .pfrow .h { display:flex; flex-wrap:wrap; gap:4px 12px; align-items:baseline; margin-bottom:8px; }
@@ -112,7 +95,7 @@
 <body>
 <div class="wrap">
   <h1>参考视频检索</h1>
-  <p class="sub">上传产品图 → AI 拆解关键词 → 多平台检索参考广告片 → 可选下载　·　<a href="/method" target="_blank">检索方法说明</a>　·　<a href="/developer" target="_blank">接口文档</a></p>
+  <p class="sub">上传产品图 → AI 拆解关键词 → 多平台检索参考广告片 → 可选下载　·　<a href="/method" target="_blank">检索方法说明</a>　·　<a href="/developer" target="_blank">接口文档</a>　·　<a href="/dashboard">数据看板</a></p>
 
   <div class="card">
     <div class="form">
@@ -163,16 +146,7 @@
   <button id="dlbtn" disabled>下载所选</button>
 </div>
 
-<div id="modal" class="modal hidden"><div class="mbox">
-  <div class="mhead"><span class="t" id="mtitle"></span>
-    <button class="ghost" id="mprev" title="上一条（←）">‹ 上一条</button>
-    <button class="ghost" id="mnext" title="下一条（→）">下一条 ›</button>
-    <button id="mclose" title="关闭（Esc）">关闭</button></div>
-  <div class="stage" id="stage"></div>
-  <div class="mfoot"><span id="mmsg"></span><span class="sp"></span>
-    <button class="ghost hidden" id="mrelay" style="padding:4px 10px;font-size:12px">服务器中转播放</button>
-    <a id="morig" href="#" target="_blank" rel="noopener">原页面打开 ↗</a></div>
-</div></div>
+<script src="/static/player.js?v=2"></script>
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -377,84 +351,6 @@ async function loadPlatform(pl, box) {
   } catch (e) { box.innerHTML = `<span class="note err">抓取失败</span>`; }
 }
 
-// ---------- 站内播放 ----------
-function playAttrs(url, title, platform, local = "", image = "") {
-  return `data-play="${esc(url)}" data-title="${esc(title || "")}" data-pf="${esc(platform || "")}"`
-       + (local ? ` data-local="${esc(local)}"` : "") + (image ? ` data-image="${esc(image)}"` : "");
-}
-let playList = [], playIdx = -1, playToken = 0;
-document.addEventListener("click", e => {
-  const a = e.target.closest("[data-play]");
-  if (!a || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
-  e.preventDefault();
-  playList = [...document.querySelectorAll("[data-play]")].filter((x, i, arr) =>
-    arr.findIndex(y => y.dataset.play === x.dataset.play) === i);
-  playIdx = playList.findIndex(x => x.dataset.play === a.dataset.play);
-  openPlayer(a.dataset);
-});
-function stage(html, tall) {
-  $("#stage").className = "stage" + (tall ? " tall" : "");
-  $("#stage").innerHTML = html;
-}
-async function openPlayer(d) {
-  const token = ++playToken;
-  $("#modal").classList.remove("hidden");
-  $("#mtitle").textContent = (d.pf ? `[${d.pf}] ` : "") + d.title;
-  $("#morig").href = safeUrl(d.play);
-  $("#mrelay").classList.add("hidden");
-  $("#mmsg").textContent = "";
-  if (d.image) return stage(`<img src="${esc(safeUrl(d.image))}" referrerpolicy="no-referrer" alt="">`);
-  if (d.local) { $("#mmsg").textContent = "播放的是已下载到服务器的文件"; return playVideo(d.local); }
-  stage("正在解析播放地址…");
-  try {
-    const r = await (await fetch(`/api/play?url=${encodeURIComponent(d.play)}`)).json();
-    if (token !== playToken) return;
-    if (r.kind === "iframe") {
-      stage(`<iframe src="${esc(r.src)}" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>`,
-            /douyin/.test(r.src));
-      $("#mrelay").classList.remove("hidden");
-      $("#mmsg").textContent = "官方播放器内嵌。打不开（如 YouTube 需翻墙）可点“服务器中转播放”";
-    } else if (r.kind === "video") playVideo(r.src);
-    else relayPlay(d.play);
-  } catch (e) { stage("解析失败，请点“原页面打开”"); }
-}
-function playVideo(src) {
-  stage(`<video src="${esc(src)}" controls autoplay playsinline></video>`);
-}
-async function relayPlay(url) {
-  const token = ++playToken;
-  $("#mrelay").classList.add("hidden");
-  stage("该站不能内嵌，服务器正在拉取视频（通常 10~60 秒）…");
-  try {
-    const r = await fetch("/api/relay", {method: "POST", headers: {"Content-Type": "application/json"},
-                                         body: JSON.stringify({url})});
-    const jid = (await r.json()).job_id;
-    while (token === playToken) {
-      const j = await (await fetch(`/api/jobs/${jid}`)).json();
-      if (j.status === "running") { await new Promise(r => setTimeout(r, 1500)); continue; }
-      if (token !== playToken) return;
-      if (j.status === "done" && j.result.ok) { $("#mmsg").textContent = "服务器中转播放（480p 缓存）"; return playVideo(j.result.src); }
-      return stage(`<div style="padding:20px;text-align:center">无法站内播放：${esc((j.result && j.result.error) || j.error || "未知错误")}<br><br>请点下方“原页面打开”</div>`);
-    }
-  } catch (e) { stage("中转失败，请点“原页面打开”"); }
-}
-function closePlayer() { playToken++; $("#modal").classList.add("hidden"); $("#stage").innerHTML = ""; }
-function step(n) {
-  if (!playList.length) return;
-  playIdx = (playIdx + n + playList.length) % playList.length;
-  openPlayer(playList[playIdx].dataset);
-}
-$("#mclose").onclick = closePlayer;
-$("#mprev").onclick = () => step(-1);
-$("#mnext").onclick = () => step(1);
-$("#mrelay").onclick = () => relayPlay(playList[playIdx]?.dataset.play || $("#morig").href);
-$("#modal").onclick = e => { if (e.target.id === "modal") closePlayer(); };
-document.addEventListener("keydown", e => {
-  if ($("#modal").classList.contains("hidden")) return;
-  if (e.key === "Escape") closePlayer();
-  else if (e.key === "ArrowLeft") step(-1);
-  else if (e.key === "ArrowRight") step(1);
-});
 
 function updSel() {
   const n = document.querySelectorAll(".sel:checked").length;
@@ -476,6 +372,9 @@ fetch("/api/direct_platforms").then(r => r.json()).then(a => DIRECT = new Set(a)
 loadSources();
 loadHistory();
 refreshTasks();
+// 从数据看板跳转过来：/#run=<run_id>
+const hashRun = decodeURIComponent((location.hash.match(/^#run=([\w-]+)/) || [])[1] || "");
+if (hashRun) viewRun(hashRun);
 </script>
 </body>
 </html>
