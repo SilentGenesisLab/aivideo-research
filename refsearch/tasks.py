@@ -54,8 +54,9 @@ def _restore() -> None:
         _tasks[t["id"]] = t
 
 
-def submit(kind: str, title: str, fn, meta: dict | None = None) -> str:
-    """fn(progress) 返回 dict；检索/下载任务的返回值里有 run_id，会记到任务上。"""
+def submit(kind: str, title: str, fn, meta: dict | None = None, on_finish=None) -> str:
+    """fn(progress) 返回 dict；检索/下载任务的返回值里有 run_id，会记到任务上。
+    on_finish(task) 在任务结束（成功或失败）后调用，用于 Webhook 通知。"""
     tid = uuid.uuid4().hex[:12]
     t = {"id": tid, "kind": kind, "title": title, "status": "queued", "created": _now(), "seq": time.time_ns(),
          "started": None, "finished": None, "log": [], "error": None, "run_id": None,
@@ -82,6 +83,11 @@ def submit(kind: str, title: str, fn, meta: dict | None = None) -> str:
             t["error"], t["status"] = str(e)[:500], "error"
         t["finished"] = _now()
         _save(t)
+        if on_finish:
+            try:
+                on_finish(t)
+            except Exception:
+                pass
 
     _POOLS[kind].submit(run)
     return tid
@@ -100,8 +106,9 @@ def position(t: dict) -> int:
                and x.get("seq", 0) < t.get("seq", 0))
 
 
-def recent(limit: int = 50) -> list[dict]:
-    items = [t for t in list(_tasks.values()) if t["kind"] != "relay"]
+def recent(limit: int = 50, client: str | None = None) -> list[dict]:
+    items = [t for t in list(_tasks.values()) if t["kind"] != "relay"
+             and (client is None or t["meta"].get("client") == client)]
     items.sort(key=lambda t: t.get("seq", 0), reverse=True)
     return [{**{k: v for k, v in t.items() if k not in ("log", "result")},
              "last": t["log"][-1] if t["log"] else "", "ahead": position(t)} for t in items[:limit]]

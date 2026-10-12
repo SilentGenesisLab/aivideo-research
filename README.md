@@ -24,6 +24,16 @@
     yt-dlp 下载 + 合并为 H.264/AAC 的 mp4（默认 ≤720p）
 ```
 
+## 作为模块接入其他网站
+
+提供独立的对外接口 `/api/v1`（API Key 鉴权、异步任务、Webhook 回调、限时签名文件链接）：
+
+- 接入文档：[docs/API.md](docs/API.md)
+- 在线调试：`http://<服务地址>/api/v1/docs`（Swagger）；OpenAPI：`/api/v1/openapi.json`
+- 示例：[examples/python_client.py](examples/python_client.py)、[examples/node_client.mjs](examples/node_client.mjs)
+- 开通：在 `.env` 配置 `API_KEYS`、`WEBHOOK_SECRET`（见 `.env_sample`），重启服务
+- 接口自测：`.venv/bin/python tests/api_test.py 产品图.jpg`
+
 ## Docker 部署（推荐）
 
 ```bash

@@ -16,17 +16,21 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from refsearch import config, pipeline, platforms, player, tasks
+import api_v1
+from refsearch import config, pipeline, platforms, player, security, tasks
 from refsearch.searchers import SOURCES
 
-app = FastAPI(title="参考视频检索")
+app = FastAPI(title="参考视频检索", docs_url=None, redoc_url=None, openapi_url=None)  # 对外文档见 /api/v1/docs
 APP_USER = os.environ.get("APP_USER", "admin")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 
 
 @app.middleware("http")
 async def basic_auth(request: Request, call_next):
-    if APP_PASSWORD and request.url.path != "/api/health":
+    # /api/v1 用 API Key 鉴权，/files 用签名校验，都不走网页登录
+    path = request.url.path
+    public = path == "/api/health" or path.startswith(("/api/v1/", "/files/"))
+    if APP_PASSWORD and not public:
         ok = False
         auth = request.headers.get("authorization", "")
         if auth.startswith("Basic "):
@@ -206,6 +210,17 @@ def job(jid: str):
     return out
 
 
+@app.get("/files/{path:path}", include_in_schema=False)
+def signed_file(path: str, exp: int = 0, sig: str = ""):
+    """对外接口给出的限时签名链接（产品图、下载的视频、报告、中转缓存）。"""
+    f = (config.RUNS_DIR / path).resolve()
+    if (not security.verify_file(path, exp, sig) or not f.is_relative_to(config.RUNS_DIR.resolve())
+            or f.name.startswith(".") or not f.is_file()):
+        raise HTTPException(403, "链接无效或已过期")
+    return FileResponse(f)
+
+
+app.mount("/api/v1", api_v1.api)
 app.mount("/runs", StaticFiles(directory=config.RUNS_DIR), name="runs")
 
 if __name__ == "__main__":
