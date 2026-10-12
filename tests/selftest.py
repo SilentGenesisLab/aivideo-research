@@ -187,8 +187,28 @@ def online(image):
         check("接口调用统计", "by_client" in requests.get(f"{base}/api/admin/api-usage").json())
 
         # 站内播放
-        r = requests.get(f"{base}/api/play", params={"url": "https://www.bilibili.com/video/BV1Bu4y1q7Yy"}).json()
+        r = requests.get(f"{base}/api/play", params={"url": "https://www.bilibili.com/video/BV1xx411c7mD"}).json()
         check("站内播放：B 站内嵌", r["kind"] == "iframe" and "player.bilibili.com" in r["src"], r)
+        got = [d for d in (requests.get(f"{base}/runs/{res['run_id']}/result.json").json().get("downloads") or []) if d["ok"]]
+        if got:
+            r = requests.get(f"{base}/api/play", params={"url": got[0]["url"]}).json()
+            check("站内播放：已下载的视频直接播放本地文件", r["kind"] == "video" and r.get("local")
+                  and requests.get(base + r["src"], headers={"Range": "bytes=0-9"}).status_code == 206, r)
+            jid = requests.post(f"{base}/api/download", json={"run_id": res["run_id"], "urls": [got[0]["url"]]}).json()["job_id"]
+            t0 = time.time()
+            while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] in ("queued", "running"):
+                time.sleep(0.5)
+            check("下载缓存：同一视频再次下载直接复用", j["status"] == "done" and time.time() - t0 < 5
+                  and any("命中下载缓存" in x for x in j["log"]), j["log"][-2:])
+        th = requests.get(f"{base}/img", params={"run": res["run_id"], "w": 160})
+        check("缩略图：产品图缩小为 webp 并长期缓存", th.headers.get("content-type") == "image/webp"
+              and len(th.content) < 60000 and "immutable" in th.headers.get("cache-control", ""), len(th.content))
+        vth = next(v["thumbnail"] for g in res["groups"] for v in g["videos"] if v.get("thumbnail"))
+        th = requests.get(f"{base}/img", params={"u": vth, "w": 480})
+        check("缩略图：外站封面由服务器代理缓存", th.status_code == 200 and th.headers.get("content-type", "").startswith("image/"))
+        check("缩略图：拒绝内网地址", "svg" in requests.get(f"{base}/img", params={"u": "http://127.0.0.1:22/x.png"}).headers.get("content-type", ""))
+        check("页面与接口启用 gzip", requests.get(f"{base}/api/runs", headers={"Accept-Encoding": "gzip"}).headers.get("content-encoding") == "gzip")
+        check("静态文件可缓存", "max-age" in requests.get(f"{base}/static/layout.js").headers.get("cache-control", ""))
         r = requests.get(f"{base}/api/play", params={"url": "https://www.digitaling.com/projects/167565.html"}).json()
         check("站内播放：数英案例页挖出播放器", r["kind"] == "iframe", r)
         r = requests.get(f"{base}/api/play", params={"url": "https://www.adsoftheworld.com/campaigns/michael-buble-makes-fresh-sparkling-water"}).json()

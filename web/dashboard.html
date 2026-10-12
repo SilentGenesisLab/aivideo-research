@@ -7,7 +7,7 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="stylesheet" href="/static/layout.css?v=2">
+<link rel="stylesheet" href="/static/layout.css?v=3">
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --text:#1d2129; --muted:#6b7280; --line:#e5e7eb;
           --accent:#2563eb; --accent-soft:#eff4ff; --ok:#16a34a; --ok-soft:#e8f7ee; --bad:#dc2626; --bad-soft:#fdecec;
@@ -83,7 +83,7 @@
 </style>
 </head>
 <body>
-<script src="/static/layout.js?v=1"></script>
+<script src="/static/layout.js?v=3"></script>
 <div class="wrap">
   <div class="top"><h1 id="ptitle">数据看板</h1><span class="note" id="psub"></span></div>
 
@@ -163,7 +163,7 @@
   </section>
 </div>
 
-<script src="/static/player.js?v=2"></script>
+<script src="/static/player.js?v=3"></script>
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -200,8 +200,9 @@ function fillSelect(sel, values) {
 }
 
 // ---------- 概览 ----------
-async function loadOverview() {
-  const o = await get("/api/admin/overview"), k = o.kpi;
+function loadOverview() { return swrJSON("/api/admin/overview", renderOverview); }
+function renderOverview(o) {
+  const k = o.kpi;
   kpis($("#kpis"), [
     ["检索总数", k.runs_total, `今日 ${k.runs_today} · 近 7 天 ${k.runs_7d}`],
     ["参考视频（去重）", k.videos_unique, `其中广告正片 ${k.videos_ad}`],
@@ -230,14 +231,18 @@ async function loadVideos(append = false) {
   const p = new URLSearchParams({q: $("#vq").value.trim(), platform: vPlatform || $("#vplatform").value,
     dim: $("#vdim").value, min_score: $("#vscore").value, client: $("#vclient").value,
     downloaded: $("#vdl").checked, sort: $("#vsort").value, limit: 60, offset: vOffset});
-  const r = await get("/api/admin/videos?" + p);
+  if (append) return renderVideos(await get("/api/admin/videos?" + p), true);
+  return swrJSON("/api/admin/videos?" + p, r => renderVideos(r, false));
+}
+function renderVideos(r, append) {
+  if (!append) vOffset = 0;
   fillSelect($("#vplatform"), r.all_platforms);
   fillSelect($("#vclient"), r.clients);
   $("#vstat").textContent = `共 ${r.total} 条（同一视频出现在多次检索中只算一条）`;
   $("#vchips").innerHTML = r.platforms.map(([n, c]) => `<span class="chip ${vPlatform === n ? "on" : ""}" data-pf="${esc(n)}">${esc(n)} ${c}</span>`).join("");
   const cards = r.items.map(v => `<div class="vc">
     <a class="thumb" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${playAttrs(v.url, v.title, v.platform, v.local)}>
-      <img src="${esc(safeUrl(v.thumbnail))}" referrerpolicy="no-referrer" loading="lazy" alt=""><span class="play">▶</span>
+      <img src="${esc(thumbUrl(v.thumbnail, 480))}" loading="lazy" decoding="async" alt=""><span class="play">▶</span>
       <span class="badge">${esc(v.platform)}${v.duration ? " · " + Math.floor(v.duration / 60) + ":" + String(v.duration % 60).padStart(2, "0") : ""}</span>
       <span class="badge score">${esc(v.score)}分</span>${v.local ? `<span class="badge dl">已下载</span>` : ""}</a>
     <div class="vb"><a class="vt" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${playAttrs(v.url, v.title, v.platform, v.local)}>${esc(v.title)}</a>
@@ -262,8 +267,13 @@ $("#vchips").onclick = e => {
 let tTimer = null;
 async function loadTasks() {
   clearTimeout(tTimer);
-  const p = new URLSearchParams({client: $("#tclient").value, kind: $("#tkind").value, status: $("#tstatus").value, limit: 300});
-  const [list, all] = await Promise.all([get("/api/admin/tasks?" + p), get("/api/admin/tasks?limit=1000")]);
+  let active = 0;
+  await swrJSON("/api/admin/tasks?limit=1000", all => { active = renderTasks(all); });
+  if (active && current === "tasks") tTimer = setTimeout(loadTasks, 5000);
+}
+function renderTasks(all) {
+  const fc = $("#tclient").value, fk = $("#tkind").value, fs = $("#tstatus").value;
+  const list = all.filter(t => (!fc || t.client === fc) && (!fk || t.kind === fk) && (!fs || t.status === fs)).slice(0, 300);
   fillSelect($("#tclient"), [...new Set(all.map(t => t.client))]);
   const done = all.filter(t => t.status === "done"), fin = all.filter(t => t.status === "done" || t.status === "error");
   const durs = done.filter(t => t.kind === "search" && t.duration).map(t => t.duration);
@@ -283,14 +293,16 @@ async function loadTasks() {
       <td><span class="m" title="${esc(t.error || t.last)}">${esc((t.error || t.last || "").slice(0, 60))}</span></td>
       <td style="white-space:nowrap">${t.run_id && t.status === "done" ? `<a href="/#run=${encodeURIComponent(t.run_id)}" target="_blank">查看结果</a>` : ""}</td></tr>`));
   $("#tauto").textContent = active ? "有进行中的任务，每 5 秒自动刷新" : "";
-  if (active && current === "tasks") tTimer = setTimeout(loadTasks, 5000);
+  return active;
 }
 ["#tclient", "#tkind", "#tstatus"].forEach(s => $(s).onchange = loadTasks);
 
 // ---------- 接口调用 ----------
-async function loadApi() {
+function loadApi() {
   const p = new URLSearchParams({days: $("#adays").value, client: $("#arclient").value, errors_only: $("#arerr").checked, limit: 200});
-  const u = await get("/api/admin/api-usage?" + p);
+  return swrJSON("/api/admin/api-usage?" + p, renderApi);
+}
+function renderApi(u) {
   fillSelect($("#arclient"), u.by_client.map(c => c.client));
   const avg = u.by_client.length ? Math.round(u.by_client.reduce((a, c) => a + c.avg_ms * c.calls, 0) / Math.max(1, u.total)) : null;
   kpis($("#akpis"), [

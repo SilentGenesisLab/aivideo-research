@@ -14,12 +14,13 @@ import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 
 import api_v1
 import time
 
-from refsearch import config, pipeline, platforms, player, security, stats, tasks
+from refsearch import config, downloader, images, pipeline, platforms, player, security, stats, tasks
 from refsearch.searchers import SOURCES
 
 app = FastAPI(title="参考视频检索", docs_url=None, redoc_url=None, openapi_url=None)  # 对外文档见 /api/v1/docs
@@ -115,6 +116,31 @@ def developer_example(name: str):
     if name not in EXAMPLES:
         raise HTTPException(404, "示例不存在")
     return FileResponse(Path(__file__).parent / "examples" / name, media_type=f"{EXAMPLES[name]}; charset=utf-8")
+
+
+IMG_CACHE = {"Cache-Control": "public, max-age=2592000, immutable"}
+
+
+@app.get("/img", include_in_schema=False)
+def img(u: str = "", run: str = "", w: int = 480):
+    """缩略图：外站封面（u=地址）或某次检索的产品图（run=ID），缩小后缓存，浏览器缓存 30 天。"""
+    if run:
+        try:
+            rel = f"{run}/{pipeline.load(run).get('image', 'product.jpg')}"
+        except (FileNotFoundError, ValueError):
+            raise HTTPException(404)
+        path = images.local_thumb(rel, w)
+    elif u.startswith(("http://", "https://")):
+        path = images.remote_thumb(u, w)
+    else:
+        raise HTTPException(400)
+    if not path:  # 外站图片拿不到：返回占位图（短缓存，稍后会重试）
+        return Response(_PLACEHOLDER, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=600"})
+    return FileResponse(path, media_type="image/webp", headers=IMG_CACHE)
+
+
+_PLACEHOLDER = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 9"><rect width="16" height="9" fill="#1f2937"/>'
+                b'<path d="M6.5 2.8v3.4L9.5 4.5z" fill="#6b7280"/></svg>')
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -310,9 +336,36 @@ def signed_file(path: str, exp: int = 0, sig: str = ""):
     return FileResponse(f)
 
 
+class CachedStatic(StaticFiles):
+    """页面引用静态文件时都带 ?v=版本号，可以放心让浏览器缓存 7 天。"""
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        if resp.status_code == 200:
+            resp.headers["Cache-Control"] = "public, max-age=604800"
+        return resp
+
+
 app.mount("/api/v1", api_v1.api)
-app.mount("/static", StaticFiles(directory=WEB), name="static")
+app.mount("/static", CachedStatic(directory=WEB), name="static")
 app.mount("/runs", StaticFiles(directory=config.RUNS_DIR), name="runs")
+
+class SelectiveGZip:
+    """压缩页面、脚本和 JSON；视频、图片、下载文件不压缩（已是压缩格式，且要支持断点续传）。"""
+    SKIP = ("/runs/", "/files/", "/img", "/favicon", "/apple-touch-icon")
+
+    def __init__(self, app):
+        self.app, self.gzip = app, GZipMiddleware(app, minimum_size=1024)
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        if scope["type"] == "http" and (not path.startswith(self.SKIP) or path.endswith((".json", ".md"))) \
+                and not path.endswith((".mp4", ".png", ".jpg", ".webp", ".ico")):
+            return await self.gzip(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+app.add_middleware(SelectiveGZip)
+downloader.backfill()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

@@ -12,6 +12,7 @@ import json
 import threading
 import time
 import uuid
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Literal
 
@@ -501,7 +502,7 @@ def play(request: Request, url: str = Query(description="视频页面地址")):
         raise ApiError(400, "invalid_url", str(e))
     r = player.resolve(url)
     if r["kind"] == "video" and r["src"].startswith("/runs/"):
-        r["src"] = _abs(_base(request), security.signed_path(r["src"].removeprefix("/runs/")))
+        r["src"] = _abs(_base(request), security.signed_path(unquote(r["src"].removeprefix("/runs/"))))
     return r
 
 

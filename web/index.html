@@ -7,7 +7,7 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="stylesheet" href="/static/layout.css?v=2">
+<link rel="stylesheet" href="/static/layout.css?v=3">
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --text:#1d2129; --muted:#6b7280; --line:#e5e7eb;
           --accent:#2563eb; --accent-soft:#eff4ff; --ok:#16a34a; --bad:#dc2626; }
@@ -97,7 +97,7 @@
 </style>
 </head>
 <body>
-<script src="/static/layout.js?v=1"></script>
+<script src="/static/layout.js?v=3"></script>
 <div class="wrap">
   <h1>视频检索</h1>
   <p class="sub">上传产品图 → AI 拆解关键词 → 多平台检索参考广告片 → 可选下载</p>
@@ -151,7 +151,7 @@
   <button id="dlbtn" disabled>下载所选</button>
 </div>
 
-<script src="/static/player.js?v=2"></script>
+<script src="/static/player.js?v=3"></script>
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -171,8 +171,8 @@ function setFile(f) {
 const checkedSources = () => [...document.querySelectorAll(".pf:checked")].map(c => c.value);
 function updSrcCount() { $("#srccount").textContent = checkedSources().length; }
 
-async function loadSources() {
-  const list = await (await fetch("/api/sources", {cache: "no-store"})).json();
+function loadSources() { return swrJSON("/api/sources", renderSources); }
+function renderSources(list) {
   const groups = {};
   list.forEach(s => (groups[s.group] = groups[s.group] || []).push(s));
   $("#sources").innerHTML = Object.entries(groups).map(([g, items]) =>
@@ -184,12 +184,12 @@ async function loadSources() {
 $("#srcall").onclick = () => { document.querySelectorAll(".pf").forEach(c => c.checked = true); updSrcCount(); };
 $("#srcnone").onclick = () => { document.querySelectorAll(".pf").forEach(c => c.checked = false); updSrcCount(); };
 
-async function loadHistory() {
-  const runs = await (await fetch("/api/runs", {cache: "no-store"})).json();
+function loadHistory() { return swrJSON("/api/runs", renderHistory); }
+function renderHistory(runs) {
   if (!runs.length) { $("#hist").innerHTML = `<span class="note">还没有检索记录</span>`; return; }
   $("#hist").innerHTML = runs.map(r => `
     <div class="hrow ${current && current.run_id === r.run_id ? "on" : ""}">
-      <img src="${esc(r.image)}" alt="" loading="lazy">
+      <img src="${esc(r.thumb || r.image)}" alt="" loading="lazy" decoding="async">
       <div><div class="t">${esc(r.product || "未识别")}${r.brief ? ` <span class="m">· ${esc(r.brief.slice(0, 40))}</span>` : ""}</div>
         <div class="m">${esc(r.created)} · ${r.kept} 条参考片 · ${r.platforms.length} 个来源（${esc(r.platforms.join("、"))}）${r.downloads ? ` · 已下载 ${r.downloads}` : ""}</div></div>
       <div class="acts"><button class="ghost" data-view="${esc(r.run_id)}">查看</button>
@@ -312,7 +312,7 @@ function render(res) {
       const local = d && d.ok ? `/runs/${res.run_id}/${encodeURI(d.file)}` : "";
       const pa = playAttrs(v.url, v.title, v.platform, local);
       h += `<div class="v"><a class="thumb" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${pa}>
-          <img src="${esc(safeUrl(v.thumbnail))}" referrerpolicy="no-referrer" loading="lazy" alt=""><span class="play">▶</span>
+          <img src="${esc(thumbUrl(v.thumbnail, 480))}" loading="lazy" decoding="async" alt=""><span class="play">▶</span>
           <span class="badge">${esc(v.platform)} · ${fmtDur(v.duration)}</span>
           <span class="badge score">${esc(v.score)}分</span></a>
         <div class="vb"><a class="vt" href="${esc(safeUrl(v.url))}" target="_blank" rel="noopener" ${pa}>${esc(v.title)}</a>
@@ -349,7 +349,7 @@ async function loadPlatform(pl, box) {
     if (!j.items?.length) { box.innerHTML = `<span class="note">${esc(j.error || "这次没抓到结果，可点右上“更多结果”去平台搜索")}</span>`; return; }
     box.innerHTML = j.items.map(it => `<a class="it" href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener"
         ${it.media === "image" ? playAttrs(it.url, it.title, it.platform, "", it.thumbnail) : playAttrs(it.url, it.title, it.platform)}>
-        <div class="thumb"><img src="${esc(safeUrl(it.thumbnail))}" referrerpolicy="no-referrer" loading="lazy" alt="">
+        <div class="thumb"><img src="${esc(thumbUrl(it.thumbnail, 320))}" loading="lazy" decoding="async" alt="">
           ${it.media === "image" ? "" : `<span class="play">▶</span>`}
           ${it.duration ? `<span class="badge">${fmtDur(it.duration)}</span>` : ""}</div>
         <div class="tt">${esc(it.title)}</div></a>`).join("");

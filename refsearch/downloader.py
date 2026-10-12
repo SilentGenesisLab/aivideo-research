@@ -2,16 +2,84 @@
 
 每条视频在独立子进程里下载并设硬超时：有些站点（如 iSpot.tv）会长时间“连着但不给数据”，
 yt-dlp 自身的 socket 超时管不住，只能整体超时后结束进程。"""
+import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 from . import config
+from .searchers import canonical
 
 TIMEOUT = 180  # 单条视频最长下载时间（秒）
 _TRANSIENT = ("No video formats found", "KeyError", "HTTP Error 412", "HTTP Error 429")
+
+
+# ---------------- 下载缓存：同一视频同一清晰度只下载一次 ----------------
+_IDX = config.RUNS_DIR / "_downloads.json"
+_idx_lock = threading.Lock()
+
+
+def _load_idx() -> dict:
+    try:
+        return json.loads(_IDX.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def cached_path(url: str, max_height: int | None = None) -> Path | None:
+    """已下载过的文件；不指定清晰度时返回清晰度最高的一份。"""
+    c = canonical(url)
+    idx = _load_idx()
+    keys = [f"{c}|{max_height}"] if max_height else sorted(
+        (k for k in idx if k.rsplit("|", 1)[0] == c), key=lambda k: int(k.rsplit("|", 1)[1]), reverse=True)
+    for k in keys:
+        if k in idx and (f := config.RUNS_DIR / idx[k]).is_file():
+            return f
+    return None
+
+
+def _remember(url: str, max_height: int, path: Path) -> None:
+    with _idx_lock:
+        idx = _load_idx()
+        idx[f"{canonical(url)}|{max_height}"] = str(path.resolve().relative_to(config.RUNS_DIR.resolve()))
+        tmp = _IDX.with_suffix(".tmp")
+        tmp.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_IDX)
+
+
+def backfill() -> int:
+    """把加入缓存功能之前已下载的视频登记进索引（按默认 720p）。"""
+    idx, n = _load_idx(), 0
+    for f in config.RUNS_DIR.glob("*/result.json"):
+        try:
+            r = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for d in r.get("downloads", []):
+            p = f.parent / (d.get("file") or "")
+            k = f"{canonical(d['url'])}|720"
+            if d.get("ok") and p.is_file() and k not in idx:
+                idx[k] = str(p.resolve().relative_to(config.RUNS_DIR.resolve()))
+                n += 1
+    if n:
+        with _idx_lock:
+            _IDX.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+    return n
+
+
+def _reuse(src: Path, out_dir: Path) -> Path:
+    dest = out_dir / src.name
+    if dest.resolve() != src.resolve() and not dest.exists():
+        try:
+            os.link(src, dest)  # 硬链接：不占额外空间
+        except OSError:
+            shutil.copy2(src, dest)
+    return dest
 
 
 def _safe(name: str, n: int = 60) -> str:
@@ -31,6 +99,14 @@ def download(videos: list[dict], out_dir: Path, max_height: int = 720,
     for i, v in enumerate(videos, 1):
         if on_progress:
             on_progress(f"下载 {i}/{len(videos)}：{v.get('title','')[:40]}")
+        hit = cached_path(v["url"], max_height)
+        if hit:
+            dest = _reuse(hit, out_dir)
+            results.append({"url": v["url"], "title": v.get("title", ""), "ok": True, "file": str(dest),
+                            "size_mb": round(dest.stat().st_size / 1e6, 2), "error": None, "cached": True})
+            if on_progress:
+                on_progress(f"命中下载缓存，直接复用：{v.get('title','')[:40]}")
+            continue
         stem = f"{v.get('platform','')}_{v.get('id','')}_{_safe(v.get('title',''))}"
         cmd = [
             sys.executable, "-m", "yt_dlp", "--quiet", "--no-warnings", "--no-playlist",
@@ -68,6 +144,10 @@ def download(videos: list[dict], out_dir: Path, max_height: int = 720,
         lines = [l for l in p.stdout.splitlines() if l.strip()]
         path = Path(lines[-1]) if lines else None
         if p.returncode == 0 and path and path.exists():
+            try:
+                _remember(v["url"], max_height, path)
+            except (OSError, ValueError):
+                pass
             results.append({"url": v["url"], "title": v.get("title", ""), "ok": True,
                             "file": str(path), "size_mb": round(path.stat().st_size / 1e6, 2),
                             "error": None})

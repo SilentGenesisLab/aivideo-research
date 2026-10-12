@@ -171,7 +171,7 @@ def online(image):
         r = requests.post(f"{base}/api/v1/runs/{run['run_id']}/rerun", headers=h, json={"sources": ["acfun"]})
         check("重新检索", r.status_code == 202, r.text)
 
-        r = requests.get(f"{base}/api/v1/play", headers=h, params={"url": "https://www.bilibili.com/video/BV1Bu4y1q7Yy"}).json()
+        r = requests.get(f"{base}/api/v1/play", headers=h, params={"url": "https://www.bilibili.com/video/BV1xx411c7mD"}).json()
         check("播放解析", r["kind"] == "iframe", r)
         r = requests.post(f"{base}/api/v1/relay", headers=h, json={"url": "https://www.youtube.com/watch?v=o_s2tvaVxt4"})
         rt = wait(base, h, r.json()["task_id"], 300)

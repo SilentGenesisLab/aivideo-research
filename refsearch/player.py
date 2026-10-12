@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -86,6 +86,9 @@ def _direct(url: str) -> str | None:
 
 def resolve(url: str) -> dict:
     """返回 {kind: iframe|video|relay, src}；relay 表示需要服务器中转。"""
+    # 服务器上已下载过的直接播放本地文件：最快，也不受外站网络限制（如 YouTube）
+    if (f := downloader.cached_path(url)) and f.suffix == ".mp4":
+        return {"kind": "video", "src": "/runs/" + quote(str(f.relative_to(config.RUNS_DIR))), "local": True}
     if e := embed_url(url):
         return {"kind": "iframe", "src": e}
     if cached := cached_file(url):

@@ -177,6 +177,7 @@ def list_runs() -> list[dict]:
         out.append({
             "run_id": r["run_id"], "created": r.get("created", ""), "brief": r.get("brief", ""),
             "image": f"/runs/{r['run_id']}/{r.get('image', 'product.jpg')}",
+            "thumb": f"/img?run={r['run_id']}&w=160",
             "product": f"{p.get('brand', '')} {p.get('name', '')}".strip(),
             "category": p.get("category", ""), "kept": len(vids),
             "platforms": sorted({v["platform"] for v in vids}),

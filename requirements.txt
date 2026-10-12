@@ -5,3 +5,4 @@ python-multipart>=0.0.9
 requests>=2.31
 imageio-ffmpeg>=0.5
 markdown>=3.5
+Pillow>=10

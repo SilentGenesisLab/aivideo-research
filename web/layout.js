@@ -1,4 +1,21 @@
 // 统一左侧菜单：放在 <body> 开头同步执行，避免页面闪动。数据看板的子页面用 #hash 切换，不刷新页面。
+// 先显示上次的数据（存在 sessionStorage），再后台取最新的，变化了才重新渲染：切换菜单时内容立即出现。
+window.swrJSON = async function (url, render) {
+  const key = "swr:" + url;
+  let old = null;
+  try { old = sessionStorage.getItem(key); } catch (e) {}
+  if (old) { try { render(JSON.parse(old), true); } catch (e) { old = null; } }
+  const r = await fetch(url, {cache: "no-store"});
+  if (!r.ok) throw new Error(r.status);
+  const text = await r.text();
+  if (text !== old) {
+    try { sessionStorage.setItem(key, text); } catch (e) {}
+    render(JSON.parse(text), false);
+  }
+};
+// 外站封面、产品图统一走服务器缩略图缓存
+window.thumbUrl = (u, w) => /^https?:\/\//i.test(u || "") ? `/img?w=${w || 480}&u=${encodeURIComponent(u)}` : (u || "");
+
 (function () {
   const I = {
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
