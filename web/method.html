@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>检索方法说明</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2129; --muted:#6b7280; --line:#e5e7eb;
+          --accent:#2563eb; --accent-soft:#eff4ff; --ok:#16a34a; --warn:#d97706; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111317; --card:#1b1e24; --text:#e6e8eb; --muted:#9aa1ab; --line:#2c313a;
+            --accent:#6b9bff; --accent-soft:#1f2a40; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:15px/1.75 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  .wrap { max-width:960px; margin:0 auto; padding:28px 16px 80px; }
+  h1 { font-size:24px; margin:0 0 4px; } h2 { font-size:18px; margin:0 0 10px; }
+  .sub { color:var(--muted); margin:0 0 22px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px 22px; margin-bottom:16px; }
+  a { color:var(--accent); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; white-space:nowrap; }
+  .tbl { overflow-x:auto; }
+  .flow { display:grid; grid-template-columns:repeat(auto-fit,minmax(165px,1fr)); gap:10px; }
+  .step { background:var(--accent-soft); border-radius:10px; padding:12px 14px; }
+  .step b { display:block; color:var(--accent); margin-bottom:4px; }
+  .step span { font-size:13px; color:var(--muted); }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  code { background:var(--accent-soft); padding:1px 6px; border-radius:4px; font-size:13px; }
+  ul, ol { padding-left:20px; margin:6px 0; } li { margin:3px 0; }
+  .tip { border-left:3px solid var(--accent); padding:4px 0 4px 12px; color:var(--muted); margin-top:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>检索方法说明</h1>
+  <p class="sub">这个平台怎么找参考片、为什么快、覆盖哪些来源，以及拿到结果之后怎么用。<a href="/">← 返回检索</a></p>
+
+  <div class="card">
+    <h2>一、整体流程</h2>
+    <div class="flow">
+      <div class="step"><b>① 识图拆词</b><span>DeepSeek 识别产品，生成产品画像和 5 个参考维度，每个维度包含“参考什么”和中英文关键词</span></div>
+      <div class="step"><b>② 多源并发检索</b><span>16 个渠道，每个渠道只搜它擅长的语言，约 150 次检索同时发出</span></div>
+      <div class="step"><b>③ 去重过滤</b><span>统一地址去重，按时长过滤合集和片段</span></div>
+      <div class="step"><b>④ AI 打分标注</b><span>0~10 分，判断是否广告正片，写出具体参考点</span></div>
+      <div class="step"><b>⑤ 输出与下载</b><span>按维度、按来源轮流选取，可勾选下载</span></div>
+    </div>
+    <p class="tip">五个参考维度：<b>同品类</b>（同类产品怎么拍）、<b>竞品</b>（对手在拍什么）、<b>情绪主题</b>（适合的情绪和叙事）、<b>结构形式</b>（钩子、节奏、一镜到底等）、<b>获奖标杆</b>（戛纳等经典作品）。</p>
+  </div>
+
+  <div class="card">
+    <h2>二、为什么快</h2>
+    <ol>
+      <li><b>直接调接口，不打开网页</b>：YouTube 只读搜索列表（yt-dlp 的扁平模式），B 站直接调用官方搜索接口，不加载视频页面，也不渲染浏览器。</li>
+      <li><b>借搜索引擎覆盖难爬的平台</b>：抖音、腾讯视频、爱奇艺和海外广告库，统一通过<b>必应视频搜索</b>获取。必应结果页的每条视频都带结构化数据（真实地址、时长、标题、缩略图），一次请求约 0.3 秒。</li>
+      <li><b>全部并发</b>：16 个渠道约 150 次检索同时进行（必应限 4 路、B 站串行，避免触发风控），5 个维度的 AI 打分也并行执行。</li>
+      <li><b>按语言分发关键词</b>：中文词搜国内平台，英文词搜海外平台，不做无效检索。</li>
+      <li><b>先粗筛再精排</b>：每个维度按渠道轮流取最多 90 条候选交给 AI 打分，控制耗时和成本。</li>
+      <li><b>相关性过滤</b>：必应偶尔会返回无关视频，标题里不含关键词的结果直接丢弃，并换一种写法补足。</li>
+    </ol>
+    <p class="tip">一次完整检索大约 1~2 分钟，其中大部分时间花在 AI 识图和打分上，平台检索本身只要十几秒。</p>
+  </div>
+
+  <div class="card">
+    <h2>三、来源覆盖</h2>
+    <div class="tbl"><table>
+      <tr><th>分组</th><th>渠道</th><th>检索方式</th><th>能找到什么</th><th>下载</th></tr>
+      <tr><td rowspan="7">国内视频</td><td>B 站</td><td>官方接口；被风控时自动改走必应</td><td>国内广告、怀旧广告、获奖合集、拉片解析</td><td class="ok">✅</td></tr>
+      <tr><td>抖音</td><td>必应视频定向</td><td>投放中的短视频广告、种草内容</td><td class="warn">需配置 cookies</td></tr>
+      <tr><td>优酷</td><td>优酷搜索接口</td><td>卫视、央视播出的电视广告存档</td><td class="warn">视情况</td></tr>
+      <tr><td>腾讯视频</td><td>必应视频定向</td><td>品牌宣传片、电视广告</td><td class="warn">视情况</td></tr>
+      <tr><td>爱奇艺</td><td>必应视频定向</td><td>品牌宣传片、贴片广告</td><td class="warn">视情况</td></tr>
+      <tr><td>AcFun</td><td>站内搜索</td><td>广告盘点、趣味广告</td><td class="ok">✅</td></tr>
+      <tr><td>全网视频（中文）</td><td>必应视频</td><td>以上各站加搜狐视频等的聚合结果</td><td class="ok">✅（抖音除外）</td></tr>
+      <tr><td rowspan="3">海外视频</td><td>YouTube</td><td>yt-dlp 搜索（中英文）</td><td>全球品牌官方 TVC、港台广告</td><td class="ok">✅</td></tr>
+      <tr><td>Dailymotion</td><td>官方开放接口</td><td>欧洲广告、电视广告搬运</td><td class="ok">✅</td></tr>
+      <tr><td>全网视频（海外）</td><td>必应视频</td><td>海外各视频站和媒体的聚合结果</td><td class="warn">视情况</td></tr>
+      <tr><td rowspan="6">广告案例库</td><td><b>数英</b></td><td>站内搜索</td><td>国内最大的广告案例库，含视频与创意说明，<b>TVC 首选</b></td><td class="warn">打开案例页观看</td></tr>
+      <tr><td>新片场</td><td>必应视频定向</td><td>国内广告片导演作品（收录较少）</td><td class="warn">打开原页观看</td></tr>
+      <tr><td><b>iSpot.tv</b></td><td>必应视频定向</td><td>美国电视广告全库</td><td class="ok">✅</td></tr>
+      <tr><td>Ads of the World</td><td>必应视频定向</td><td>全球广告案例</td><td class="ok">✅</td></tr>
+      <tr><td>Adweek</td><td>必应视频定向</td><td>行业媒体的广告报道（收录较少）</td><td class="warn">视情况</td></tr>
+      <tr><td>CulturePub</td><td>必应视频定向</td><td>法国及欧洲经典广告</td><td class="bad">✗ 打开原页观看</td></tr>
+    </table></div>
+    <p class="tip"><b>站内播放</b>：点任意缩略图或标题，都在本页弹窗播放，用 ← → 切换上一条、下一条，Esc 关闭。
+      B 站、YouTube、优酷、腾讯视频、抖音、AcFun、Dailymotion 用官方播放器内嵌；数英、Adweek 等案例页会自动找出页面里的播放器；
+      iSpot.tv、Ads of the World、爱奇艺等不能内嵌的站点，由服务器拉取一份 480p 缓存后播放（首次 10~60 秒，之后秒开）。
+      YouTube 在国内打不开时，点“服务器中转播放”即可。</p>
+    <p class="tip"><b>参考平台</b>：数英、Ads of the World、戛纳获奖作品、新片场、iSpot.tv、抖音、花瓣会直接列出作品，点开即看；
+      广告门、Vimeo、Meta 广告资料库、TikTok Creative Center、巨量创意、小红书、FILMGRAB、Pinterest 需要登录或拒绝服务器访问，只能打开它们的搜索页。</p>
+  </div>
+
+  <div class="card">
+    <h2>四、拿到结果后怎么用</h2>
+    <ol>
+      <li><b>每个维度先看 2~3 条最高分的</b>，确认 AI 写的“参考点”是不是真的成立。AI 只看到标题，看不到画面。</li>
+      <li><b>挑 5~8 条精看，下载下来拉片</b>，按下表逐条拆解：</li>
+    </ol>
+    <div class="tbl"><table>
+      <tr><th>拆解项</th><th>要回答的问题</th></tr>
+      <tr><td>商业目标</td><td>这条片想让观众做什么或记住什么？</td></tr>
+      <tr><td>核心洞察</td><td>抓住了用户的什么真实痛点或情绪？</td></tr>
+      <tr><td>开头钩子</td><td>前 3 秒用什么留住人？</td></tr>
+      <tr><td>情绪曲线</td><td>起、承、转、合分别在第几秒？高潮在哪里？</td></tr>
+      <tr><td>产品角色</td><td>产品是推动剧情的关键，还是最后才露面？</td></tr>
+      <tr><td>记忆点</td><td>看完能记住的一句话或一个画面是什么？</td></tr>
+      <tr><td>视听手法</td><td>镜头、剪辑节奏、色调、音乐、旁白</td></tr>
+      <tr><td><b>可借鉴点</b></td><td>我们能直接拿来用的具体做法</td></tr>
+      <tr><td><b>不适用点</b></td><td>受预算、调性或平台限制，不适合我们的部分</td></tr>
+    </table></div>
+    <ol start="3">
+      <li><b>补充检索</b>：结果页底部的参考平台已直接列出数英、新片场、戛纳等平台的作品；Meta 广告资料库和巨量创意（竞品在投素材）需登录后手动看。</li>
+      <li><b>归档</b>：把 <code>Markdown 报告</code> 和拆解表放进团队素材库，项目结束后回填“哪些参考真正用上了”。</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>五、提高结果质量的技巧</h2>
+    <ul>
+      <li><b>产品图</b>：包装正面、背景干净、文字清晰，品牌识别会更准。</li>
+      <li><b>一定要写简报</b>：商业目标、目标人群、时长、调性，以及想参考的竞品。简报越具体，关键词越准。</li>
+      <li><b>时长过滤</b>：只要 TVC 就设为 ≤ 90 秒；想看品牌长片就设为 ≤ 300 秒。</li>
+      <li><b>结果太少</b>：调大“每词取 N 条”；某个来源报错时，可以只勾选其他来源再搜一次。</li>
+      <li><b>历史检索</b>：首页下方的“历史检索”可以查看任意一次的结果；“用当前渠道重新检索”会用同一张产品图和简报，按当前勾选的渠道再搜一次，旧记录保留。</li>
+      <li><b>B 站偶尔被风控</b>：属于正常现象，系统会自动降级重试，失败的检索会列在“检索异常”里。管理员在服务器上配置 <code>BILIBILI_COOKIE</code> 后可以明显缓解。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

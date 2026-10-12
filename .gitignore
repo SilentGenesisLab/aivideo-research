@@ -1,0 +1,12 @@
+# 密钥与本地配置（.env_sample 是模板，需要提交）
+.env
+.env.*
+*.env
+*cookies*.txt
+# 运行产物
+.venv/
+runs/
+__pycache__/
+*.pyc
+server.log
+server.pid

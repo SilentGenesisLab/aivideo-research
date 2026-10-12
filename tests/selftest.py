@@ -1,0 +1,194 @@
+"""自测：python tests/selftest.py [产品图]      （不带图片只跑离线单元测试）"""
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import requests  # noqa: E402
+
+from refsearch import config, pipeline  # noqa: E402
+from refsearch.llm import parse_json  # noqa: E402
+from refsearch.platforms import platform_links  # noqa: E402
+from refsearch.searchers import _dur  # noqa: E402
+
+PASS, FAIL = [], []
+
+
+def check(name, cond, detail=""):
+    (PASS if cond else FAIL).append(name)
+    print(("  ✅ " if cond else "  ❌ ") + name + (f"  —— {detail}" if detail and not cond else ""))
+
+
+def offline():
+    print("【离线单元测试】")
+    check("JSON 解析：围栏", parse_json('```json\n{"a":1}\n```') == {"a": 1})
+    check("JSON 解析：前后有杂字", parse_json('好的：{"a":[1,2]} 以上') == {"a": [1, 2]})
+    check("时长解析", (_dur("1:30"), _dur("1:02:03"), _dur(""), _dur("x")) == (90, 3723, None, None))
+    vids = [{"platform": "YouTube", "score": s, "url": f"y{s}"} for s in (10, 9, 9, 8)] + \
+           [{"platform": "Bilibili", "score": s, "url": f"b{s}"} for s in (7, 6)]
+    got = pipeline._balanced(vids, 4)
+    check("平台轮选：两个平台都入选", {v["platform"] for v in got} == {"YouTube", "Bilibili"}, got)
+    check("平台轮选：按分数排序", [v["score"] for v in got] == sorted([v["score"] for v in got], reverse=True))
+    links = platform_links({"product": {"brand": "X", "competitors": ["元气森林（无糖气泡水）"]},
+                            "dimensions": [{"key": "category", "queries_zh": ["气泡水 广告"],
+                                            "queries_en": ["soda ad"]},
+                                           {"key": "award", "queries_en": ["Cannes Lions drinks"]}]})
+    meta = next(l for l in links if l["name"].startswith("Meta"))
+    cannes = next(l for l in links if l["name"].startswith("戛纳"))
+    check("竞品名去括号", meta["query"] == "元气森林", meta["query"])
+    check("戛纳关键词不重复", cannes["url"].lower().count("cannes") == 1, cannes["url"])
+    from refsearch.player import embed_url
+    cases = {"https://www.youtube.com/watch?v=drZIKbUMEuY": "youtube.com/embed/drZIKbUMEuY",
+             "https://www.bilibili.com/video/BV1Bu4y1q7Yy": "bvid=BV1Bu4y1q7Yy",
+             "https://v.youku.com/v_show/id_XNDc0Nzg5Mzk0OA==.html": "youku.com/embed/XNDc0Nzg5Mzk0OA",
+             "https://v.qq.com/x/page/z0891zr71qn.html": "vid=z0891zr71qn",
+             "https://www.douyin.com/video/7694849932179672360": "vid=7694849932179672360",
+             "https://www.acfun.cn/v/ac41316767": "player/ac41316767",
+             "https://www.dailymotion.com/video/x28fved": "embed/video/x28fved"}
+    check("内嵌播放器地址", all(want in (embed_url(u) or "") for u, want in cases.items()),
+          {u: embed_url(u) for u in cases})
+    check("不可内嵌的站点返回空", embed_url("https://www.ispot.tv/ad/121P/x") is None)
+    try:
+        pipeline.load("../../etc")
+        check("run_id 路径穿越防护", False)
+    except (ValueError, FileNotFoundError):
+        check("run_id 路径穿越防护", True)
+
+
+def probe(path):
+    ff = config.ffmpeg_path()
+    out = subprocess.run([ff, "-hide_banner", "-i", path], capture_output=True, text=True).stderr
+    v = "h264" if "Video: h264" in out else out.split("Video: ")[1].split()[0] if "Video: " in out else "?"
+    a = "aac" if "Audio: aac" in out else out.split("Audio: ")[1].split()[0] if "Audio: " in out else "?"
+    return v, a
+
+
+def online(image):
+    print("\n【在线端到端测试：网页服务】")
+    port = 8799
+    srv = subprocess.Popen([sys.executable, "server.py", "--port", str(port)], cwd=ROOT,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(40):
+            try:
+                requests.get(base, timeout=1); break
+            except requests.ConnectionError:
+                time.sleep(0.5)
+        check("首页可访问", requests.get(base).status_code == 200)
+        check("方法说明页可访问", "检索方法说明" in requests.get(f"{base}/method").text)
+        check("首页禁止缓存", "no-cache" in requests.get(base).headers.get("cache-control", ""))
+        srcs = requests.get(f"{base}/api/sources").json()
+        check("渠道列表 ≥ 15 个", len(srcs) >= 15, len(srcs))
+        r = requests.post(f"{base}/api/search", files={"image": ("a.txt", b"x")})
+        check("拒绝非图片上传", r.status_code == 400)
+
+        t = time.time()
+        with open(image, "rb") as f:
+            r = requests.post(f"{base}/api/search", files={"image": ("p.jpg", f, "image/jpeg")},
+                              data={"brief": "30秒TVC，年轻白领，零糖无负担", "per_query": 8})
+        jid = r.json()["job_id"]
+        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] == "running":
+            time.sleep(2)
+        check("检索任务完成", j["status"] == "done", j.get("error"))
+        res = j["result"]
+        vids = [v for g in res["groups"] for v in g["videos"]]
+        pfs = {v["platform"] for v in vids}
+        print(f"     用时 {time.time() - t:.0f}s，{res['stats']}，平台分布 "
+              f"{ {p: sum(v['platform'] == p for v in vids) for p in pfs} }")
+        check("识别出产品品类", bool(res["analysis"]["product"].get("category")))
+        check("生成 5 个参考维度", len(res["groups"]) == 5, len(res["groups"]))
+        check("每个维度都有参考视频", all(g["videos"] for g in res["groups"]),
+              [g["name"] for g in res["groups"] if not g["videos"]])
+        check("结果覆盖 ≥ 8 个来源", len(pfs) >= 8, pfs)
+        check("每条都有参考点和地址", all(v.get("reference") and v["url"].startswith("https://") for v in vids))
+        check("参考平台链接 ≥ 10 个", len(res["platform_links"]) >= 10)
+        b_fail = [e for e in res["errors"] if e.startswith("B 站")]
+        check("B 站检索无失败（被风控时自动改走必应兜底）", not b_fail, b_fail)
+        check("最终结果包含 B 站视频", "Bilibili" in pfs, pfs)
+        check("报告文件可访问", requests.get(f"{base}/runs/{res['run_id']}/report.md").status_code == 200)
+
+        # 勾选下载：每个平台各取最短的一条
+        pick = [min((v for v in vids if v["platform"] == p), key=lambda v: v.get("duration") or 999)["url"]
+                for p in sorted(pfs & {"YouTube", "Bilibili"})]
+        r = requests.post(f"{base}/api/download", json={"run_id": res["run_id"], "urls": pick})
+        jid = r.json()["job_id"]
+        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] == "running":
+            time.sleep(2)
+        dls = j["result"]["downloads"]
+        check("勾选下载全部成功", len(dls) == len(pick) and all(d["ok"] for d in dls),
+              [d["error"] for d in dls if not d["ok"]])
+        for d in dls:
+            if d["ok"]:
+                path = config.RUNS_DIR / res["run_id"] / d["file"]
+                v, a = probe(str(path))
+                check(f"编码 H.264+AAC：{Path(d['file']).name[:40]}", (v, a) == ("h264", "aac"), (v, a))
+                url = f"{base}/runs/{res['run_id']}/{d['file']}"
+                check("下载文件可通过网页访问", requests.head(url).status_code in (200, 405)
+                      or requests.get(url, stream=True).status_code == 200)
+        r = requests.post(f"{base}/api/download", json={"run_id": "../x", "urls": pick})
+        check("下载接口拒绝非法 run_id", r.status_code == 404)
+
+        hist = requests.get(f"{base}/api/runs").json()
+        check("历史列表包含本次检索", any(h["run_id"] == res["run_id"] for h in hist))
+        check("历史产品图可访问",
+              requests.get(base + next(h["image"] for h in hist if h["run_id"] == res["run_id"])).status_code == 200)
+        r = requests.post(f"{base}/api/rerun", json={"run_id": res["run_id"], "platforms": ["youku", "digitaling"]})
+        jid = r.json()["job_id"]
+        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] == "running":
+            time.sleep(2)
+        rr = j.get("result") or {}
+        check("重新检索成功并生成新记录", j["status"] == "done" and rr.get("run_id") != res["run_id"], j.get("error"))
+        check("重新检索只用了所选渠道", rr.get("sources") == ["youku", "digitaling"], rr.get("sources"))
+        check("重新检索沿用原简报", rr.get("brief") == res["brief"])
+
+        # 站内播放
+        r = requests.get(f"{base}/api/play", params={"url": "https://www.bilibili.com/video/BV1Bu4y1q7Yy"}).json()
+        check("站内播放：B 站内嵌", r["kind"] == "iframe" and "player.bilibili.com" in r["src"], r)
+        r = requests.get(f"{base}/api/play", params={"url": "https://www.digitaling.com/projects/167565.html"}).json()
+        check("站内播放：数英案例页挖出播放器", r["kind"] == "iframe", r)
+        r = requests.get(f"{base}/api/play", params={"url": "https://www.adsoftheworld.com/campaigns/michael-buble-makes-fresh-sparkling-water"}).json()
+        check("站内播放：Ads of the World 解析出视频直链", r["kind"] == "video", r)
+        check("站内播放：拒绝非 http 地址",
+              requests.get(f"{base}/api/play", params={"url": "file:///etc/passwd"}).status_code == 400)
+        relay_url = "https://www.youtube.com/watch?v=o_s2tvaVxt4"
+        t0 = time.time()
+        jid = requests.post(f"{base}/api/relay", json={"url": relay_url}).json()["job_id"]
+        while (j := requests.get(f"{base}/api/jobs/{jid}").json())["status"] == "running":
+            time.sleep(2)
+        rr = j.get("result") or {}
+        check("中转播放：拉取成功", rr.get("ok"), rr or j.get("error"))
+        if rr.get("ok"):
+            print(f"     中转用时 {time.time() - t0:.0f}s：{rr['src']}")
+            check("中转播放：文件可访问", requests.get(base + rr["src"], headers={"Range": "bytes=0-99"}).status_code == 206)
+            from refsearch.player import cached_file
+            check("中转播放：再次打开直接命中缓存", cached_file(relay_url) == rr["src"])
+
+        # 参考平台直达
+        for pl in res["platform_links"]:
+            if pl["direct"]:
+                r = requests.get(f"{base}/api/platform_items", params={"name": pl["name"], "q": pl["query"]}).json()
+                print(f"     {pl['name']}：{len(r['items'])} 条 {r.get('error', '')}")
+        direct = [pl for pl in res["platform_links"] if pl["direct"]]
+        check("参考平台：可直达的平台 ≥ 6 个", len(direct) >= 6, [p["name"] for p in direct])
+        r = requests.get(f"{base}/api/platform_items", params={"name": "数英网 DIGITALING", "q": "气泡水"}).json()
+        check("参考平台：数英直接返回作品", len(r["items"]) >= 3 and "/projects/" in r["items"][0]["url"], r)
+        r = requests.get(f"{base}/api/platform_items", params={"name": "花瓣", "q": "气泡水 海报"}).json()
+        check("参考平台：花瓣返回图片", len(r["items"]) >= 3 and r["items"][0]["media"] == "image", r)
+        check("参考平台：需登录的平台返回 404",
+              requests.get(f"{base}/api/platform_items", params={"name": "小红书", "q": "x"}).status_code == 404)
+        print(f"     运行目录：runs/{res['run_id']}")
+    finally:
+        srv.terminate()
+
+
+if __name__ == "__main__":
+    offline()
+    if len(sys.argv) > 1:
+        online(sys.argv[1])
+    print(f"\n通过 {len(PASS)}，失败 {len(FAIL)}" + (f"：{FAIL}" if FAIL else ""))
+    sys.exit(1 if FAIL else 0)
