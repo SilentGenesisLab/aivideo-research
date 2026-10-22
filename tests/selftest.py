@@ -310,11 +310,26 @@ def offline_text():
         check("没有图也没有检索词时报错", True)
 
 
+def offline_acfun():
+    """AcFun 解析：标题带双引号时不能吃进后面的网页源码。"""
+    from refsearch.searchers import _parse_acfun
+    card = ('<a href="/v/ac{ac}" target="_blank" data-click-log=\'{log}\'>\n<img src="https://img/{ac}.jpg?x=1" alt=""/>'
+            '<span class="video__duration">1:05</span></a><div class="title">x</div>')
+    good = json.dumps({"content_id": 1, "title": '他说"好喝" 冷萃咖啡'}, ensure_ascii=False)
+    bad = '{"title":"夏天必饮"}\'>夏天必饮</a></div><div class="info">'
+    html_ = card.format(ac=1, log=good) + card.format(ac=2, log='{"title":"普通标题"}') + card.format(ac=3, log=bad)
+    got = _parse_acfun(html_)
+    check("AcFun：标题里的双引号原样保留", got and got[0]["title"] == '他说"好喝" 冷萃咖啡', got)
+    check("AcFun：普通标题", len(got) >= 2 and got[1]["title"] == "普通标题", got)
+    check("AcFun：不出现带网页源码的标题", all("<" not in v["title"] and len(v["title"]) <= 200 for v in got), got)
+
+
 if __name__ == "__main__":
     offline()
     offline_filters()
     offline_depth()
     offline_text()
+    offline_acfun()
     if len(sys.argv) > 1:
         online(sys.argv[1])
     print(f"\n通过 {len(PASS)}，失败 {len(FAIL)}" + (f"：{FAIL}" if FAIL else ""))

@@ -308,18 +308,37 @@ def search_youku(query: str, limit: int = 8) -> list[dict]:
     return out[:limit]
 
 
+def _acfun_title(log: str) -> str | None:
+    """从卡片的 data-click-log（JSON）里取标题。以前用正则截到 "}'> 为止，标题里带双引号时会一路吃进后面的
+    网页源码；现在按 JSON 解析，解析不了再退回正则，并丢弃含尖括号或过长的结果。"""
+    try:
+        title = json.loads(html.unescape(log)).get("title")
+    except (ValueError, AttributeError):
+        m = re.search(r'"title":"(.*)"\}\s*$', log, re.S)
+        title = html.unescape(m.group(1)) if m else None
+    if not isinstance(title, str):
+        return None
+    title = title.strip()
+    return title if title and len(title) <= 200 and "<" not in title and ">" not in title else None
+
+
 def search_acfun(query: str, limit: int = 8) -> list[dict]:
     t = _direct.get("https://www.acfun.cn/search", params={"keyword": query}, timeout=15).text
     t = t.replace('\\"', '"').replace("\\/", "/")
+    return _parse_acfun(t, limit)
+
+
+def _parse_acfun(t: str, limit: int = 8) -> list[dict]:
     out, seen = [], set()
-    pat = (r'<a href="/v/ac(\d+)"[^>]*data-click-log=\'[^\']*"title":"(.*?)"\}\'>\s*<img src="([^"]+)"'
+    pat = (r'<a href="/v/ac(\d+)"[^>]*data-click-log=\'([^\']*)\'>\s*<img src="([^"]+)"'
            r'.*?video__duration">([\d:]+)<')
-    for ac, title, img, dur in re.findall(pat, t, re.S):
-        if ac in seen:
+    for ac, log, img, dur in re.findall(pat, t, re.S):
+        title = _acfun_title(log)
+        if ac in seen or not title:
             continue
         seen.add(ac)
         out.append(_video("AcFun", f"ac{ac}", f"https://www.acfun.cn/v/ac{ac}",
-                          html.unescape(title), "", _dur(dur), None, img.split("?")[0]))
+                          title, "", _dur(dur), None, img.split("?")[0]))
     return out[:limit]
 
 
