@@ -276,10 +276,45 @@ def online(image):
         srv.terminate()
 
 
+def offline_text():
+    """文字检索（品牌名 / 产品名）：维度清洗、品牌/产品名兜底、参数校验。不调用模型。"""
+    from refsearch import analyze
+    fake = {"product": {"brand": "未知", "name": ""}, "dimensions": [
+        {"key": "brand", "name": "品牌官方", "queries_zh": ["a", "b", "c"], "queries_en": ["x"]},
+        {"key": "brand", "name": "重复的 key", "queries_zh": ["d"], "queries_en": []},
+        {"key": "line2", "name": "空关键词", "queries_zh": [], "queries_en": []},
+        {"key": "", "name": "没有 key", "queries_zh": ["e"], "queries_en": []},
+        {"key": "competitor", "name": "竞品", "queries_zh": ["f"], "queries_en": ["", "g"]}]}
+    orig, seen = analyze.chat_json, {}
+    analyze.chat_json = lambda system, prompt: (seen.update(prompt=prompt), json.loads(json.dumps(fake)))[1]
+    try:
+        d = analyze.analyze_text("三顿半", "brand", n_queries=2)
+        check("文字检索：去掉重复 key、空 key、没有关键词的维度", [x["key"] for x in d["dimensions"]] == ["brand", "competitor"], d)
+        check("文字检索：关键词截到 n_queries 且去掉空串", d["dimensions"][0]["queries_zh"] == ["a", "b"]
+              and d["dimensions"][1]["queries_en"] == ["g"], d)
+        check("文字检索：品牌未知时用输入的品牌名", d["product"]["brand"] == "三顿半", d["product"])
+        check("文字检索：提示词里没有残留的双大括号", "{{" not in seen["prompt"] and "三顿半" in seen["prompt"])
+        d = analyze.analyze_text("燕麦拿铁", "product")
+        check("文字检索：产品名为空时用输入的产品名", d["product"]["name"] == "燕麦拿铁", d["product"])
+    finally:
+        analyze.chat_json = orig
+    try:
+        analyze.analyze_text("x", "shop")
+        check("文字检索：未知 query_type 报错", False)
+    except ValueError:
+        check("文字检索：未知 query_type 报错", True)
+    try:
+        pipeline.run_search(None, query="  ")
+        check("没有图也没有检索词时报错", False)
+    except ValueError:
+        check("没有图也没有检索词时报错", True)
+
+
 if __name__ == "__main__":
     offline()
     offline_filters()
     offline_depth()
+    offline_text()
     if len(sys.argv) > 1:
         online(sys.argv[1])
     print(f"\n通过 {len(PASS)}，失败 {len(FAIL)}" + (f"：{FAIL}" if FAIL else ""))

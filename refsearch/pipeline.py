@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import config, filters as flt
-from .analyze import analyze_product
+from .analyze import analyze_product, analyze_text
 from .downloader import download
 from .platforms import platform_links
 from .rank import rank_dimension
@@ -85,12 +85,14 @@ def allocate(eligible: dict[str, list], total: int) -> dict[str, int]:
     return alloc
 
 
-def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
+def run_search(image_path: str | None, brief: str = "", platforms=DEFAULT_SOURCES,
                per_query: int | None = None, max_duration: int = 300, top_per_dim: int = 10,
                min_score: int = 5, download_mode: str = "none", download_top: int = 5,
                max_height: int = 720, filters: dict | None = None, extra: dict | None = None,
-               depth: str = "standard", target_count: int | None = None, progress=_noop) -> dict:
-    """extra：要并入结果的调用方信息（如 client、external_id），中间态里也会带上。
+               depth: str = "standard", target_count: int | None = None, progress=_noop,
+               query: str | None = None, query_type: str | None = None) -> dict:
+    """image_path 与 query 二选一：传产品图按图识别；不传图时按 query（品牌名 / 产品名，query_type=brand/product）文字检索。
+    extra：要并入结果的调用方信息（如 client、external_id），中间态里也会带上。
     depth：检索深度 quick/standard/deep；per_query 不传时取深度的默认值。
     target_count：目标结果总数，给了就按它在各维度间分配（覆盖 top_per_dim），达标视频不够时会少于目标。"""
     dp = DEPTHS.get(depth) or DEPTHS["standard"]
@@ -111,24 +113,32 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
             break
         except FileExistsError:
             continue
-    img_copy = run_dir / f"product{Path(image_path).suffix or '.jpg'}"
-    shutil.copy(image_path, img_copy)
+    img_copy = None
+    if image_path:
+        img_copy = run_dir / f"product{Path(image_path).suffix or '.jpg'}"
+        shutil.copy(image_path, img_copy)
+    elif not (query or "").strip():
+        raise ValueError("产品图与检索词至少要有一个")
+    text = {"query": query.strip(), "query_type": query_type} if not image_path else {}
     f = flt.normalize(filters)
     platforms = [p for p in platforms if p in SEARCHERS]
     part = _Partial(run_dir, {
-        "run_id": run_id, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "image": img_copy.name,
-        "brief": brief, "sources": list(platforms), "filters": f, "options": options, **(extra or {}),
+        "run_id": run_id, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "image": img_copy.name if img_copy else None,
+        "brief": brief, "sources": list(platforms), "filters": f, "options": options, **text, **(extra or {}),
         "analysis": None, "groups": [], "platform_links": [], "errors": [], "downloads": [],
         "stats": {"queries": 0, "raw": 0, "kept": 0, "seconds": 0},
         "searched": {}, "progress": {"pct": 0, "stage": "", "rev": 0}}, progress)
     getattr(progress, "update", lambda **kw: None)(run_id=run_id)
 
     # 1. 识图拆词
-    progress("① 识别产品并拆解关键词…")
-    part.set(3, "识别产品", force=True)
+    progress("① 识别产品并拆解关键词…" if img_copy else f"① 分析{'品牌' if query_type == 'brand' else '产品'}「{query.strip()}」并拆解关键词…")
+    part.set(3, "识别产品" if img_copy else "分析检索词", force=True)
     if flt.describe(f):
         progress(f"筛选条件：{flt.describe(f)}")
-    analysis = analyze_product(str(img_copy), brief, flt.prompt_hint(f), n_queries=dp["queries"])
+    if img_copy:
+        analysis = analyze_product(str(img_copy), brief, flt.prompt_hint(f), n_queries=dp["queries"])
+    else:
+        analysis = analyze_text(query, query_type, brief, flt.prompt_hint(f), n_queries=dp["queries"])
     if (td := flt.type_dimension(analysis, f, dp["type_queries"])):
         analysis["dimensions"].insert(0, td)
     p = analysis["product"]
@@ -258,8 +268,8 @@ def run_search(image_path: str, brief: str = "", platforms=DEFAULT_SOURCES,
 
     result = {
         "run_id": run_id, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "image": img_copy.name, "brief": brief, "sources": list(platforms), "analysis": analysis,
-        "filters": f, "options": options,
+        "image": img_copy.name if img_copy else None, "brief": brief, "sources": list(platforms), "analysis": analysis,
+        "filters": f, "options": options, **text,
         "groups": groups, "platform_links": links, **(extra or {}),
         "stats": {"queries": len(tasks), "raw": len(raw),
                   "kept": sum(len(g["videos"]) for g in groups), "target": target_count,
@@ -326,10 +336,12 @@ def list_runs() -> list[dict]:
             continue
         p = r.get("analysis", {}).get("product", {})
         vids = [v for g in r.get("groups", []) for v in g.get("videos", [])]
+        has_img = r.get("image", "product.jpg") is not None  # 文字检索没有产品图
         out.append({
-            "run_id": r["run_id"], "created": r.get("created", ""), "brief": r.get("brief", ""),
-            "image": f"/runs/{r['run_id']}/{r.get('image', 'product.jpg')}",
-            "thumb": f"/img?run={r['run_id']}&w=160",
+            "run_id": r["run_id"], "created": r.get("created", ""), "brief": r.get("brief", "") or r.get("query", ""),
+            "image": f"/runs/{r['run_id']}/{r.get('image', 'product.jpg')}" if has_img else "",
+            "thumb": f"/img?run={r['run_id']}&w=160" if has_img else "",
+            "query": r.get("query"), "query_type": r.get("query_type"),
             "product": f"{p.get('brand', '')} {p.get('name', '')}".strip(),
             "category": p.get("category", ""), "kept": len(vids),
             "filters": flt.describe(flt.normalize(r.get("filters"))),
@@ -340,8 +352,17 @@ def list_runs() -> list[dict]:
 
 
 def run_image(run_id: str) -> Path:
+    """该次检索的产品图；文字检索没有图，抛 FileNotFoundError（调用方改用 run_query）。"""
     result = load(run_id)
+    if result.get("image", "product.jpg") is None:
+        raise FileNotFoundError("文字检索没有产品图")
     return config.RUNS_DIR / run_id / result.get("image", "product.jpg")
+
+
+def run_query(run_id: str) -> tuple[str, str] | None:
+    """文字检索的 (query, query_type)；图片检索返回 None。"""
+    r = load(run_id)
+    return (r["query"], r.get("query_type") or "product") if r.get("query") else None
 
 
 def load(run_id: str) -> dict:

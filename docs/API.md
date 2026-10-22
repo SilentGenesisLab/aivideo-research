@@ -10,7 +10,7 @@
 
 ## 1. 它能做什么
 
-输入一张产品图（可加一段简报），返回：
+输入一张产品图（可加一段简报），**或者直接输入品牌名 / 产品名**（文字检索，见 5.2 的 `query`），返回：
 
 | 内容 | 说明 |
 |---|---|
@@ -21,6 +21,8 @@
 | 可选下载 | 指定视频下载为 mp4（H.264/AAC），返回限时下载链接 |
 
 一次检索约 **1~3 分钟**，所以所有耗时操作都是**异步任务**。
+
+想先看已有结果？`GET /library?q=品牌名` 会在历次检索积累的视频库里立即检索（不产生新检索），没有或不够时再创建检索任务。
 
 ---
 
@@ -152,6 +154,7 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | GET | `/api/v1/play?url=` | 解析视频的播放方式 |
 | POST | `/api/v1/relay` | 服务器中转播放（不能内嵌的站点） |
 | GET | `/api/v1/reference-platforms/items?name=&q=` | 直接取某个参考平台的作品 |
+| GET | `/api/v1/library?q=` | 在已有视频库里检索（立即返回，不产生新检索） |
 
 ### 5.1 GET /sources
 
@@ -188,8 +191,10 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `image_url` | string | — | 产品图公网地址，与 `image_base64` **二选一** |
+| `image_url` | string | — | 产品图公网地址。`image_url` / `image_base64` / `query` **三选一** |
 | `image_base64` | string | — | 产品图 base64，可带 `data:image/jpeg;base64,` 前缀 |
+| `query` | string ≤100 | — | **文字检索**：品牌名或产品名，不需要产品图，配合 `query_type` |
+| `query_type` | `brand`/`product` | `product` | `brand`：检索该品牌的官方广告、各条主要产品线（最多 3 条）的同品类爆款、竞品；`product`：检索本品、同品类、竞品、情绪主题、结构形式 |
 | `brief` | string | `""` | 简报：目标、人群、时长、调性、想参考的竞品。**越具体结果越准** |
 | `sources` | string[] | 全部 | 检索渠道 key |
 | `depth` | `quick`/`standard`/`deep` | `standard` | 检索深度，见下表 |
@@ -238,6 +243,17 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 被筛掉的条数按原因记在结果的 `stats.filtered`：`duration` 时长不符、`exclude` 含排除词、`must` 不含必含词、`type` 类型不符、`ad` 非广告正片、`score` 评分过低。
 
 返回 202：`{"task_id", "status": "queued", "status_url"}`
+
+**文字检索**（输入品牌名或产品名，不传图）：
+
+```bash
+curl -X POST https://<服务地址>/api/v1/searches -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"query": "三顿半", "query_type": "brand", "depth": "quick"}'
+```
+
+结果结构与图片检索相同，区别：`product_image_url` 为 `null`；`query`、`query_type` 有值；`product.product_lines` 是识别出的主要产品线；
+维度 key 为 `brand` 品牌官方 / `category`、`line2`、`line3` 各产品线 / `competitor` 竞品（品牌检索），
+或 `product` 本品 / `category` / `competitor` / `emotion` / `structure`（产品检索）。不认识的品牌按名称字面推断品类，结果会偏少。
 
 ### 5.3 POST /searches/upload
 
@@ -464,6 +480,28 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
 `direct=false` 的平台（Meta 广告资料库、巨量创意、小红书等）需要登录，只能打开 `search_url`。
 
 ---
+
+### 5.11 GET /library?q=（已有视频库）
+
+在历次检索（所有调用方）找到的参考视频里按关键词检索，**立即返回**，不产生新检索、不消耗额度。
+匹配标题、参考点、频道，以及当初检索的品牌 / 产品 / 品类；空格分隔多个词时须全部命中。同一视频只返回一条（分数最高的）。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `q` | 必填 | 关键词，如品牌名或产品名 |
+| `min_score` | 5 | 最低 AI 评分 |
+| `limit` | 60 | 最多返回几条（1~200） |
+| `types` | 不限 | 视频类型 key，逗号分隔 |
+
+```json
+{"total": 40, "items": [{"platform": "Bilibili", "url": "...", "title": "...", "channel": "...", "duration": 15,
+  "views": 120000, "thumbnail": "...", "score": 9, "is_ad": true, "video_type": "tvc", "video_type_name": "TVC 广告",
+  "reference": "...", "embed_url": "...", "dimension": "品牌官方", "brand": "三顿半", "category": "咖啡",
+  "found_at": "2026-10-23 03:45:14"}]}
+```
+
+常见用法：先调 `/library` 展示已有结果，不够时再 `POST /searches` 发起新检索，把新结果按 `url` 去重后追加。
+视频库是公开视频的索引，各调用方共享；不会返回别的调用方的检索 ID 和简报。
 
 ## 6. 在你的页面里播放视频
 

@@ -24,7 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from refsearch import config, filters as flt, pipeline, platforms, player, security, tasks
+from refsearch import config, filters as flt, pipeline, platforms, player, security, stats, tasks
 from refsearch.searchers import SOURCES
 
 UPLOADS = config.RUNS_DIR / "_uploads"
@@ -74,8 +74,12 @@ class Filters(BaseModel):
 
 
 class SearchCreate(BaseModel):
-    image_url: str | None = Field(None, description="产品图公网地址（jpg/png/webp，≤15MB）。与 image_base64 二选一")
+    image_url: str | None = Field(None, description="产品图公网地址（jpg/png/webp，≤15MB）。image_url / image_base64 / query 三选一")
     image_base64: str | None = Field(None, description="产品图 base64，可带 data:image/...;base64, 前缀")
+    query: str | None = Field(None, min_length=1, max_length=100,
+                              description="文字检索：品牌名或产品名（不传产品图时使用），配合 query_type")
+    query_type: Literal["brand", "product"] = Field(
+        "product", description="query 的含义：brand 品牌（检索该品牌全部产品线 + 品牌官方 + 竞品）/ product 产品（本品 + 同品类 + 竞品等）")
     brief: str = Field("", max_length=2000, description="简报：目标、人群、时长、调性、想参考的竞品等，越具体越准")
     sources: list[str] | None = Field(None, description="检索渠道 key 列表，见 GET /sources；不传则全部")
     depth: Literal["quick", "standard", "deep"] = Field(
@@ -197,8 +201,10 @@ class Run(BaseModel):
     created_at: str
     external_id: str | None
     brief: str
+    query: str | None = Field(None, description="文字检索的检索词；图片检索为 null")
+    query_type: str | None = Field(None, description="brand / product；图片检索为 null")
     sources: list[str]
-    product_image_url: str
+    product_image_url: str | None = Field(description="产品图限时链接；文字检索为 null")
     report_url: str = Field(description="Markdown 报告限时链接")
     product: dict = Field(description="产品画像：brand/name/category/appearance/selling_points/target_audience/tone/competitors")
     dimensions: list[Dimension]
@@ -214,10 +220,12 @@ class RunSummary(BaseModel):
     created_at: str
     external_id: str | None
     brief: str
+    query: str | None = None
+    query_type: str | None = None
     product: str
     category: str
     kept: int
-    product_image_url: str
+    product_image_url: str | None
 
 
 class PlayInfo(BaseModel):
@@ -280,8 +288,9 @@ def run_out(r: dict, base: str) -> dict:
 
     return {
         "run_id": rid, "created_at": r.get("created", ""), "external_id": r.get("external_id"),
-        "brief": r.get("brief", ""), "sources": r.get("sources", []),
-        "product_image_url": _file(base, rid, r.get("image", "product.jpg")),
+        "brief": r.get("brief", ""), "query": r.get("query"), "query_type": r.get("query_type"),
+        "sources": r.get("sources", []),
+        "product_image_url": _file(base, rid, r.get("image", "product.jpg")) if r.get("image", "product.jpg") else None,
         "report_url": _file(base, rid, "report.md"),
         "product": r["analysis"].get("product", {}),
         "dimensions": [{**{k: g.get(k) for k in ("key", "name", "what_to_learn")},
@@ -358,9 +367,10 @@ def _sources(keys: list[str] | None) -> tuple:
     return tuple(keys)
 
 
-def _launch(image: Path, p: SearchCreate | RerunCreate, brief: str, pfs: tuple, who: str, base: str,
-            title: str, cleanup: bool, opts: dict | None = None) -> dict:
-    tid = _search_job({"image": str(image), "brief": brief, "platforms": list(pfs), "who": who,
+def _launch(image: Path | None, p: SearchCreate | RerunCreate, brief: str, pfs: tuple, who: str, base: str,
+            title: str, cleanup: bool, opts: dict | None = None, query: tuple[str, str] | None = None) -> dict:
+    """image 与 query（(检索词, brand/product)）二选一。"""
+    tid = _search_job({"image": str(image) if image else None, "query": query, "brief": brief, "platforms": list(pfs), "who": who,
                        "external_id": p.external_id, "callback_url": p.callback_url, "base": base,
                        "title": title, "cleanup": cleanup, "opts": opts or {}})
     return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
@@ -368,14 +378,15 @@ def _launch(image: Path, p: SearchCreate | RerunCreate, brief: str, pfs: tuple, 
 
 def _search_job(spec: dict) -> str:
     """提交与失败重试共用。上传的临时图只在成功后删除，失败时留着供重试。"""
-    image, who, ext_id = Path(spec["image"]), spec["who"], spec["external_id"]
-    if not image.exists():
+    image, who, ext_id = Path(spec["image"]) if spec.get("image") else None, spec["who"], spec["external_id"]
+    query, qtype = (spec.get("query") or (None, None))
+    if image and not image.exists():
         raise tasks.RetryError(410, "原图已被清理，请重新创建检索")
 
     def work(progress):
-        res = pipeline.run_search(str(image), spec["brief"], tuple(spec["platforms"]), progress=progress,
-                                  extra={"client": who, "external_id": ext_id}, **spec["opts"])
-        if spec.get("cleanup"):
+        res = pipeline.run_search(str(image) if image else None, spec["brief"], tuple(spec["platforms"]), progress=progress,
+                                  extra={"client": who, "external_id": ext_id}, query=query, query_type=qtype, **spec["opts"])
+        if image and spec.get("cleanup"):
             image.unlink(missing_ok=True)
         res["client"], res["external_id"] = who, ext_id
         pipeline.save(res)
@@ -438,10 +449,15 @@ def list_sources():
 @router.post("/searches", response_model=TaskCreated, status_code=202, tags=["检索"],
              summary="创建检索任务（JSON，图片用 URL 或 base64）")
 def create_search(p: SearchCreate, request: Request, who: str = Depends(client)):
-    if bool(p.image_url) == bool(p.image_base64):
-        raise ApiError(400, "invalid_image", "image_url 与 image_base64 必须且只能传一个")
+    query = (p.query or "").strip()
+    if sum(map(bool, (p.image_url, p.image_base64, query))) != 1:
+        raise ApiError(400, "invalid_image", "image_url、image_base64、query 必须且只能传一个")
     _check_callback(p.callback_url)
     pfs = _sources(p.sources)
+    if query:  # 文字检索：品牌名 / 产品名，不需要产品图
+        label = "品牌" if p.query_type == "brand" else "产品"
+        return _launch(None, p, p.brief, pfs, who, _base(request), f"{label}：{query}"[:40], False, _opts(p),
+                       query=(query, p.query_type))
     if p.image_url:
         try:
             data, ext = security.fetch_image(p.image_url)
@@ -567,9 +583,11 @@ def list_runs(request: Request, limit: int = Query(20, ge=1, le=200), who: str =
         p = r.get("analysis", {}).get("product", {})
         out.append({"run_id": r["run_id"], "created_at": r.get("created", ""),
                     "external_id": r.get("external_id"), "brief": r.get("brief", ""),
+                    "query": r.get("query"), "query_type": r.get("query_type"),
                     "product": p.get("name", ""), "category": p.get("category", ""),
                     "kept": sum(len(g["videos"]) for g in r.get("groups", [])),
-                    "product_image_url": _file(base, r["run_id"], r.get("image", "product.jpg"))})
+                    "product_image_url": _file(base, r["run_id"], r.get("image", "product.jpg"))
+                    if r.get("image", "product.jpg") else None})
         if len(out) >= limit:
             break
     return out
@@ -581,7 +599,8 @@ def rerun(run_id: str, p: RerunCreate, request: Request, who: str = Depends(clie
     old = _own_run(run_id, who)
     _check_callback(p.callback_url)
     brief = old.get("brief", "") if p.brief is None else p.brief
-    image = pipeline.run_image(run_id)
+    text = pipeline.run_query(run_id)
+    image = None if text else pipeline.run_image(run_id)
     if p.external_id is None:
         p.external_id = old.get("external_id")
     title = "重新检索：" + (old["analysis"].get("product", {}).get("name") or run_id)[:30]
@@ -590,7 +609,7 @@ def rerun(run_id: str, p: RerunCreate, request: Request, who: str = Depends(clie
     target = o.get("target_count") if p.target_count is None else (p.target_count or None)
     opts = {"filters": f, "depth": p.depth or o.get("depth") or "standard", "target_count": target,
             "min_score": o.get("min_score", 5), "max_duration": o.get("max_duration", 300)}
-    return _launch(image, p, brief, _sources(p.sources), who, _base(request), title, False, opts)
+    return _launch(image, p, brief, _sources(p.sources), who, _base(request), title, False, opts, query=text)
 
 
 @router.post("/runs/{run_id}/downloads", response_model=TaskCreated, status_code=202, tags=["下载"],
@@ -612,6 +631,47 @@ def create_download(run_id: str, p: DownloadCreate, request: Request, who: str =
                          "who": who, "external_id": r.get("external_id"), "callback_url": p.callback_url,
                          "base": base})
     return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
+
+
+class LibraryVideo(BaseModel):
+    platform: str
+    url: str
+    title: str
+    channel: str | None
+    duration: int | None
+    views: int | None
+    thumbnail: str | None
+    score: float
+    is_ad: bool | None
+    video_type: str | None
+    video_type_name: str | None
+    reference: str | None
+    embed_url: str | None
+    dimension: str = Field(description="当初被检索到时所属的参考维度名称，如“同品类”“竞品”")
+    brand: str | None = Field(description="当初检索的品牌")
+    category: str | None = Field(description="当初检索的品类")
+    found_at: str = Field(description="首次被检索到的时间")
+
+
+class LibraryResult(BaseModel):
+    total: int
+    items: list[LibraryVideo]
+
+
+@router.get("/library", response_model=LibraryResult, tags=["结果"],
+            summary="在已有视频库里检索（历次检索找到的全部参考视频，立即返回，不产生新检索）")
+def library(q: str = Query(min_length=1, max_length=100, description="关键词，如品牌名或产品名；空格分隔多个词时须全部命中"),
+            min_score: float = Query(5, ge=0, le=10), limit: int = Query(60, ge=1, le=200),
+            types: str = Query("", description="视频类型 key，逗号分隔，见 GET /video-types")):
+    """匹配标题、参考点、频道，以及当初检索的品牌 / 产品 / 品类。同一视频只返回一条（分数最高的）。
+    视频库是各调用方共享的公开视频索引；不返回别的调用方的检索 ID 和简报。"""
+    r = stats.search_videos(q=q, min_score=min_score, dedupe=True, sort="score", limit=limit, vtype=types)
+    return {"total": r["total"], "items": [{
+        **{k: v.get(k) for k in ("platform", "url", "title", "channel", "duration", "views", "thumbnail",
+                                  "is_ad", "reference", "brand", "category")},
+        "score": v.get("score") or 0, "video_type": v.get("vtype"), "video_type_name": v.get("vtype_name"),
+        "embed_url": player.embed_url(v["url"]), "dimension": v.get("dim_name") or "", "found_at": v.get("created") or "",
+    } for v in r["items"]]}
 
 
 @router.get("/play", response_model=PlayInfo, tags=["播放"], summary="解析视频的站内播放方式")
