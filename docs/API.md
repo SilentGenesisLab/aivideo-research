@@ -19,8 +19,9 @@
 | 参考视频 | 每个维度最多 10 条，来自 B 站、抖音、优酷、YouTube、数英、iSpot.tv 等 16 个渠道；每条有 AI 评分（0~10）、是否广告正片、**具体参考点**、可内嵌的播放地址 |
 | 参考平台 | 15 个人工补充检索的平台及搜索链接，其中 7 个可通过接口直接取作品 |
 | 可选下载 | 指定视频下载为 mp4（H.264/AAC），返回限时下载链接 |
+| 单条链接解析 | 给一条抖音 / 小红书 / B站 / YouTube / TikTok 链接，直接返回元数据 + 可播放地址（见 5.12） |
 
-一次检索约 **1~3 分钟**，所以所有耗时操作都是**异步任务**。
+一次检索约 **1~3 分钟**，所以检索、下载、中转都是**异步任务**。只有单条链接解析（`POST /resolve`）是同步的，2~10 秒返回。
 
 想先看已有结果？`GET /library?q=品牌名` 会在历次检索积累的视频库里立即检索（不产生新检索），没有或不够时再创建检索任务。
 
@@ -108,10 +109,13 @@ Authorization: Bearer <key>
 | 400 | `invalid_sources` | `sources` 里有未知渠道 |
 | 400 | `invalid_callback_url` / `invalid_url` | 地址不是 http(s) 或指向内网 |
 | 400 | `invalid_request` | 其他业务参数错误 |
+| 400 | `resolve_failed` | 链接解析失败（平台不支持、作品不存在、地域限制、cookies 失效等，`message` 写明原因） |
 | 401 | `unauthorized` | 缺少或无效的 API Key |
+| 403 | `forbidden` | 播放签名无效或已过期，重新调用 `POST /resolve` 取新的 `stream_url` |
 | 404 | `not_found` | 任务/结果不存在，或不属于你的 Key |
 | 422 | `invalid_request` | 参数类型或取值范围错误（message 会写明字段） |
 | 502 | `upstream_error` | 第三方平台抓取失败 |
+| 502 | `stream_failed` | 播放时无法从源站取到视频（源站限流或作品已删除） |
 | 500 | `internal_error` | 服务内部错误 |
 
 ### 4.3 任务状态
@@ -130,6 +134,7 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 
 - 无需 API Key，可直接给浏览器使用；支持 Range（视频可拖动进度）。
 - **默认 7 天后失效**。需要长期保存的文件请下载到你自己的存储；过期后重新调用 `GET /runs/{run_id}` 即可拿到新链接。
+- `POST /resolve` 返回的 `stream_url` 是同一套签名，但有效期 **6 小时**（源站直链本身也会过期），过期重新解析即可。
 
 ---
 
@@ -155,6 +160,8 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | POST | `/api/v1/relay` | 服务器中转播放（不能内嵌的站点） |
 | GET | `/api/v1/reference-platforms/items?name=&q=` | 直接取某个参考平台的作品 |
 | GET | `/api/v1/library?q=` | 在已有视频库里检索（立即返回，不产生新检索） |
+| POST | `/api/v1/resolve` | 解析单条作品链接（抖音/小红书/B站/YouTube/TikTok），同步返回 |
+| GET | `/api/v1/resolve/stream?url=&exp=&sig=` | 代理播放解析结果，支持 Range，免 Key 凭签名 |
 
 ### 5.1 GET /sources
 
@@ -503,6 +510,97 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
 常见用法：先调 `/library` 展示已有结果，不够时再 `POST /searches` 发起新检索，把新结果按 `url` 去重后追加。
 视频库是公开视频的索引，各调用方共享；不会返回别的调用方的检索 ID 和简报。
 
+---
+
+### 5.12 POST /resolve（单条链接解析）
+
+用户在聊天框、收藏夹、竞品页面里粘贴一条作品链接时用这个接口：**同步返回**元数据和可播放地址，不会创建任务。
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/resolve \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"url": "https://www.bilibili.com/video/BV1re4y1f7NP"}'
+```
+
+```json
+{
+  "platform": "bilibili",
+  "platform_name": "B站",
+  "video_id": "BV1re4y1f7NP",
+  "title": "微笑趣泡气泡水广告2022",
+  "author": "某某账号",
+  "duration": 180.0,
+  "cover": "https://i0.hdslb.com/...",
+  "page_url": "https://www.bilibili.com/video/BV1re4y1f7NP",
+  "max_height": 720,
+  "desc": null,
+  "like": null,
+  "collect": null,
+  "comment": null,
+  "embed_url": "https://player.bilibili.com/player.html?bvid=BV1re4y1f7NP&autoplay=1",
+  "stream_url": "https://videodata.sligenai.cn/api/v1/resolve/stream?url=...&exp=...&sig=..."
+}
+```
+
+**请求**
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `url` | 是 | 作品链接或分享短链 |
+
+**支持的平台与短链**
+
+| 平台 | 域名 | 短链 | 说明 |
+|---|---|---|---|
+| 抖音 | `douyin.com` | `v.douyin.com` | 需要服务器的登录态 cookies，解析约 8~10 秒（要开无头浏览器），全局串行 |
+| 小红书 | `xiaohongshu.com` | `xhslink.com` | **链接必须带 `xsec_token`**（App 里“复制链接”带出来的），否则只能拿到图文页 |
+| B站 | `bilibili.com` | `b23.tv` | 支持 BV / av 号 |
+| YouTube | `youtube.com` / `youtu.be` | — | 需要出口代理 |
+| TikTok | `tiktok.com` | `vm.tiktok.com` | 需要出口代理 |
+
+视频号没有公开网页，不支持解析。
+
+**返回字段**
+
+| 字段 | 说明 |
+|---|---|
+| `platform` / `platform_name` | `douyin` / `xhs` / `bilibili` / `youtube` / `tiktok` |
+| `video_id` | 作品 ID |
+| `title` / `author` / `desc` | 标题、作者、简介 |
+| `duration` | 秒；抖音为浮点，其他取整 |
+| `cover` | 封面图；外链展示建议加 `referrerpolicy="no-referrer"` |
+| `page_url` | 规范化后的作品页地址，也是 `stream_url` 的签名内容 |
+| `max_height` | 解析到的清晰度；**抖音接口不给，为 null** |
+| `like` / `collect` / `comment` | 仅小红书有值 |
+| `embed_url` | 官方 iframe 播放器；TikTok / 小红书通常为 null |
+| `stream_url` | 本服务代理播放地址，**直接放进 `<video src>`**，支持 Range，6 小时有效 |
+
+**行为说明**
+
+- 同一个链接 30 分钟内重复请求命中缓存，不会重复解析。
+- B站 / YouTube 的高清是 DASH 音视频分离的，浏览器不能直接播。首次播放由服务端合并成本地 mp4（后台预取），已缓存时首帧 < 1 秒。
+- 解析失败返回 `400 resolve_failed`，`message` 直接可展示给用户（如“该视频在当前服务器所在地区不可用”）。
+
+---
+
+### 5.13 GET /resolve/stream（代理播放）
+
+`stream_url` 指向的就是这个地址，**不需要 API Key**，凭 URL 里的 `exp` / `sig` 签名访问，方便直接给浏览器 `<video>`：
+
+```html
+<video src="https://videodata.sligenai.cn/api/v1/resolve/stream?url=...&exp=...&sig=..." controls></video>
+```
+
+| 参数 | 说明 |
+|---|---|
+| `url` | 作品链接（`page_url`），签名覆盖此值 |
+| `exp` | 过期时间戳 |
+| `sig` | HMAC 签名，由 `POST /resolve` 生成 |
+
+- 支持 `Range: bytes=0-`，可拖动进度；返回 `206 Partial Content` 和 `video/mp4`。
+- 签名错误或过期返回 `403 forbidden`，重新调用 `POST /resolve` 即可。
+- 直连能拿到字节流的平台（抖音、小红书、B站、YouTube）边下边转；TikTok 这类对裸请求返回 403 的，先用服务端缓存一份 720p 再发。
+
 ## 6. 在你的页面里播放视频
 
 ```js
@@ -521,6 +619,24 @@ async function play(video, container) {
 - 抖音播放器是竖屏，容器建议 9:16。
 - 缩略图来自各平台，`<img>` 建议加 `referrerpolicy="no-referrer"`，否则部分平台会拒绝外链。
 - 渲染标题、参考点等文本时请做 HTML 转义，内容来自第三方平台。
+
+**用户直接粘贴一条链接时的播放**（不走检索）：
+
+```js
+// 后端：POST /api/v1/resolve  →  把 stream_url 交给前端
+const d = await fetch("/api/v1/resolve", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-API-Key": KEY },
+  body: JSON.stringify({ url: pastedUrl }),
+}).then(r => r.json());
+
+// 前端：直接播
+container.innerHTML = `<video src="${d.stream_url}" controls playsinline></video>`;
+// 或优先用官方播放器
+if (d.embed_url) container.innerHTML = `<iframe src="${d.embed_url}" allowfullscreen></iframe>`;
+```
+
+`stream_url` 6 小时有效；页面长时间挂着的话，播放失败（403）时重新调一次 `/resolve` 换新地址。
 
 ---
 
@@ -597,12 +713,27 @@ def callback():
 
 | 项 | 说明 |
 |---|---|
-| 检索耗时 | 全部 16 个渠道约 1~3 分钟；只选 3~5 个渠道约 30~60 秒 |
-| 并发 | 同时执行的检索默认 2 个（服务方可调），其余排队 |
+| 检索耗时 | 全部 16 个渠道约 1~3 分钟；只选 3~5 个渠道约 30~60 秒。只选 B站 时约 30~60 秒；含 YouTube 的检索明显更慢（要走出口代理，实测 quick + B站/YouTube 约 3.5 分钟） |
+| 并发 | 同时执行的检索默认 2 个（服务方可调），其余排队；第 3 个起 `queue_position` > 0 |
 | 轮询频率 | 建议 3~5 秒一次 |
 | 图片 | jpg / png / webp，≤ 15MB；包装正面、背景干净时识别最准 |
 | 结果稳定性 | 来自第三方平台的实时搜索，同样的输入每次结果会有差异；个别渠道偶尔失败会记录在 `errors` |
 | 版权 | 下载的视频仅供内部参考学习，不要二次发布或商用 |
+
+### 8.1 单条链接解析的实测性能（2026-11-04，服务端不含公网时延）
+
+| 平台 | 首次解析 | 缓存命中 | 首帧（Range 1MB） | 说明 |
+|---|---|---|---|---|
+| B站 | 4.7 s | 0.15 s | 0.13~0.27 s | 需服务端合并 DASH |
+| YouTube | 3.0 s | 0.15 s | 0.13~0.28 s | 走出口代理 |
+| TikTok | 2.1 s | 0.16 s | 0.68~0.82 s | 走出口代理，首播可能要等缓存 |
+| 抖音 | 8.3 s | 0.16 s | 0.34~0.43 s | 需要无头浏览器，全局串行 |
+| 小红书 | 1.8 s | 0.16 s | 0.34~0.40 s | 链接须带 `xsec_token` |
+
+- 解析结果缓存 30 分钟；合并后的 mp4 缓存 6 小时。
+- 服务端单机容量（4 核 / 7.2GB，单进程）：轻量接口约 **140 req/s**，缓存命中的 `/resolve` 约 **120 req/s**，压到 256 并发无错误；超过后时延线性上升，不会报错。
+- 检索任务跑满（2 个）时，`/resolve` p95 **25 ms**、播放 p95 **57 ms**，互不阻塞。
+- `POST /resolve` 是同步接口，抖音最慢约 10 秒；前端请设置 ≥ 60 秒超时。
 
 ---
 
