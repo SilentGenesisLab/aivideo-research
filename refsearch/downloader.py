@@ -120,6 +120,8 @@ def download(videos: list[dict], out_dir: Path, max_height: int = 720,
         ]
         if config.ffmpeg_path():
             cmd += ["--ffmpeg-location", config.ffmpeg_path()]
+        if v.get("platform") in ("YouTube", "TikTok", "Bilibili") and config.PROXY_URL:
+            cmd += ["--proxy", config.PROXY_URL]
         if v.get("platform") == "Bilibili":
             cmd += ["--add-header", "Referer:https://www.bilibili.com/"]
         if v.get("platform") == "抖音":

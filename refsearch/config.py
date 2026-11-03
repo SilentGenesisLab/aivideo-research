@@ -39,6 +39,11 @@ SOCIAL_COOKIES_DIR = Path(os.environ.get("SOCIAL_COOKIES_DIR", ROOT / "data" / "
 DOUYIN_COOKIES_FILE = os.environ.get("DOUYIN_COOKIES_FILE") or str(SOCIAL_COOKIES_DIR / "douyin_cookies.txt")
 XHS_COOKIES_FILE = os.environ.get("XHS_COOKIES_FILE") or str(SOCIAL_COOKIES_DIR / "xhs_cookies.txt")
 
+# 出口代理（大陆机器连不上 YouTube / TikTok；机房 IP 访问 B 站网页会被 412 风控）。
+# 留空表示直连；用 socks5h:// 让 DNS 也在代理侧解析
+PROXY_URL = os.environ.get("PROXY_URL", "")
+PROXY_PLATFORMS = ("youtube", "tiktok", "bilibili")
+
 RUNS_DIR = Path(os.environ.get("RUNS_DIR", ROOT / "runs"))
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 

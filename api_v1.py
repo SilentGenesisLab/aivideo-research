@@ -726,12 +726,15 @@ def relay(p: RelayCreate, request: Request, who: str = Depends(client)):
              summary="把一条作品链接解析成元数据 + 可播放地址（同步返回，抖音约 10 秒）")
 def resolve_link(p: ResolveCreate, request: Request):
     """支持抖音、小红书、B站、YouTube、TikTok 及各自短链。视频号没有公开网页，不支持。
-    B站/YouTube 走服务器出口，境外机器对部分 B站投稿有地域限制。"""
+    大陆机房访问 B站网页会被 412 风控，和 YouTube/TikTok 一样走 PROXY_URL 出口。"""
     try:
         info = resolve.resolve_cached(p.url)
     except resolve.ResolveError as e:
         raise ApiError(400, "resolve_failed", str(e))
     base = _base(request)
+    # 拿不到音视频齐全直链的平台要 yt-dlp 合并，首播会等一两分钟；
+    # 解析一返回就在后台先拉好，人点播放时通常已就绪
+    threading.Thread(target=resolve.prewarm, args=(info,), daemon=True).start()
     return {
         **{k: info.get(k) for k in ("platform", "platform_name", "video_id", "title", "author", "duration",
                                     "cover", "page_url", "max_height", "desc", "like", "collect", "comment")},

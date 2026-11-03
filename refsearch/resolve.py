@@ -9,7 +9,7 @@
   yt-dlp 的小红书插件不填标题和作者，单独从详情页的 og 标签补。
 - TikTok：2026-09 起会因 User-Agent 把 yt-dlp 判成异常（yt-dlp#17604），
   指定浏览器 UA 即可，**不需要账号或 cookies**。
-- B站：加 Referer；香港等境外 IP 对部分投稿有地域限制，属预期内失败。
+- B站：机房 IP 直接抓网页会被 412 风控（加 UA / Referer 都无解），只能走出口代理。
 - 视频号：没有公开网页，只做元数据，不解析。
 """
 import json
@@ -62,6 +62,10 @@ _CACHE_TTL = 1800
 STREAM_DIR = config.RUNS_DIR / "_resolve"
 STREAM_LIMIT = 1024 ** 3  # 直链拿不到时才落盘，上限 1GB
 
+# 同一个作品的合并任务只跑一次（首播预取和播放请求可能同时到达）
+_LOCAL: dict[str, threading.Lock] = {}
+_LOCAL_GUARD = threading.Lock()
+
 
 def _host(url: str) -> str:
     return re.sub(r"^https?://", "", url).split("/")[0].lower()
@@ -78,10 +82,12 @@ def platform_of(url: str) -> str | None:
 def expand(url: str) -> str:
     """分享短链跟随跳转，拿到真实地址。"""
     host = _host(url)
-    if not any(host == d or host.endswith("." + d) for d in SHORT):
+    short = next((v for d, v in SHORT.items() if host == d or host.endswith("." + d)), None)
+    if not short:
         return url
     try:
-        return requests.get(url, headers={"User-Agent": UA}, allow_redirects=True, timeout=20).url
+        return requests.get(url, headers={"User-Agent": UA}, allow_redirects=True, timeout=20,
+                            proxies=_proxies(short)).url
     except requests.RequestException as e:
         raise ResolveError(f"短链跳转失败：{e}")
 
@@ -111,8 +117,20 @@ def _netscape(path: Path) -> list[dict]:
     return cookies
 
 
+def _proxy(platform: str) -> str:
+    """海外平台走出口代理；大陆机器直连不了 YouTube / TikTok。"""
+    return config.PROXY_URL if platform in config.PROXY_PLATFORMS else ""
+
+
+def _proxies(platform: str) -> dict | None:
+    p = _proxy(platform)
+    return {"http": p, "https": p} if p else None
+
+
 def _ytdlp_cmd(url: str, platform: str) -> list[str]:
     cmd = [sys.executable, "-m", "yt_dlp"]
+    if p := _proxy(platform):
+        cmd += ["--proxy", p]
     if platform == "tiktok":
         cmd += ["--user-agent", UA]
     elif platform == "xhs":
@@ -153,7 +171,7 @@ def _info(url: str, platform: str) -> dict:
                 if (f.get("protocol") or "").startswith("http")
                 and f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none")]
     best = max(playable or formats, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
-    return {
+    info = {
         "platform": platform,
         "platform_name": NAMES.get(platform, platform),
         "video_id": data.get("id"),
@@ -169,6 +187,21 @@ def _info(url: str, platform: str) -> dict:
         # 播放要走 yt-dlp 合并成本地 mp4
         "muxed": bool(playable),
     }
+    if not playable:
+        info["dash"] = _dash(formats)
+    return info
+
+
+def _dash(formats: list[dict]) -> dict | None:
+    """挑出 DASH 的音轨和视频轨。B站 的 CDN 在大陆直连就行，媒体不用走代理。"""
+    vids = [f for f in formats if f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none")]
+    auds = [f for f in formats if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")]
+    if not vids or not auds:
+        return None
+    v = max([f for f in vids if (f.get("height") or 0) <= 720] or vids,
+            key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
+    a = max(auds, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+    return {"video": v["url"], "audio": a["url"], "headers": v.get("http_headers") or {}}
 
 
 def _meta(html: str, prop: str) -> str:
@@ -331,7 +364,8 @@ def open_upstream(info: dict, rng: str | None = None):
     if rng:
         headers["Range"] = rng
     try:
-        r = requests.get(info["video_url"], headers=headers, stream=True, timeout=60)
+        r = requests.get(info["video_url"], headers=headers, stream=True, timeout=60,
+                          proxies=_proxies(info["platform"]))
     except requests.RequestException:
         return None
     if r.status_code >= 400:
@@ -350,9 +384,60 @@ def _prune() -> None:
 
 
 def cache_local(info: dict, max_height: int = 720) -> Path:
-    path = download(info, STREAM_DIR, max_height)
-    _prune()
-    return path
+    """合并成本地 mp4 并缓存；同一个作品并发请求只跑一次 yt-dlp。"""
+    path = STREAM_DIR / f"{_stem(info)}.mp4"
+    if path.exists() and path.stat().st_size > 0:
+        return path
+    with _LOCAL_GUARD:
+        lock = _LOCAL.setdefault(str(path), threading.Lock())
+    with lock:
+        if path.exists() and path.stat().st_size > 0:
+            return path
+        path = download(info, STREAM_DIR, max_height)
+        _prune()
+        return path
+
+
+def prewarm(info: dict) -> None:
+    """解析成功后先把要合并的片子拉到本地：首帧请求才不会卡着等 yt-dlp。"""
+    if info.get("muxed", True):
+        return
+    try:
+        cache_local(info)
+    except Exception:
+        pass
+
+
+def _stem(info: dict) -> str:
+    return f"{info['platform']}_{info['video_id']}_{_safe_name(info.get('title'))}"
+
+
+def _dash_download(info: dict, out_dir: Path, stem: str) -> Path:
+    """B站 DASH：音轨视频轨分两条下载，再 ffmpeg 直接拷流封装。"""
+    d = info["dash"]
+    ff = config.ffmpeg_path()
+    if not ff:
+        raise ResolveError("服务器没有 ffmpeg，无法合并 B站 音视频")
+    parts = []
+    try:
+        for kind in ("video", "audio"):
+            p = out_dir / f"{stem}.{kind}.part"
+            with requests.get(d[kind], headers=d.get("headers") or {}, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                with open(p, "wb") as f:
+                    for chunk in r.iter_content(1 << 20):
+                        f.write(chunk)
+            parts.append(p)
+        out = out_dir / f"{stem}.mp4"
+        p = subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(parts[0]), "-i", str(parts[1]),
+                            "-c", "copy", "-movflags", "+faststart", str(out)],
+                           capture_output=True, text=True, timeout=180)
+        if p.returncode != 0:
+            raise ResolveError(((p.stderr or "").strip().splitlines() or ["ffmpeg 合并失败"])[-1][:300])
+        return out
+    finally:
+        for x in parts:
+            x.unlink(missing_ok=True)
 
 
 def _safe_name(text: str, limit: int = 50) -> str:
@@ -363,7 +448,7 @@ def _safe_name(text: str, limit: int = 50) -> str:
 def download(info: dict, out_dir: Path, max_height: int = 720) -> Path:
     """抖音走 CDN 直链（带 Referer 就够）；其余交给 yt-dlp，TikTok 的 CDN 对裸请求返回 403。"""
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{info['platform']}_{info['video_id']}_{_safe_name(info.get('title'))}"
+    stem = _stem(info)
 
     if info["platform"] == "douyin":
         path = out_dir / f"{stem}.mp4"
@@ -375,6 +460,9 @@ def download(info: dict, out_dir: Path, max_height: int = 720) -> Path:
                     f.write(chunk)
             tmp.replace(path)
         return path
+
+    if info["platform"] == "bilibili" and info.get("dash"):
+        return _dash_download(info, out_dir, stem)
 
     cmd = _ytdlp_cmd(info["page_url"], info["platform"]) + [
         "--quiet", "--no-warnings", "--no-playlist",
