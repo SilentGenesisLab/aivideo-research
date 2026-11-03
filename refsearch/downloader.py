@@ -123,8 +123,8 @@ def download(videos: list[dict], out_dir: Path, max_height: int = 720,
         if v.get("platform") == "Bilibili":
             cmd += ["--add-header", "Referer:https://www.bilibili.com/"]
         if v.get("platform") == "抖音":
-            if not config.DOUYIN_COOKIES_FILE:
-                results.append(_fail(v, "抖音下载需要 cookies：在 .env 配置 DOUYIN_COOKIES_FILE"))
+            if not Path(config.DOUYIN_COOKIES_FILE).exists():
+                results.append(_fail(v, f"抖音下载需要 cookies：{config.DOUYIN_COOKIES_FILE}"))
                 continue
             cmd += ["--cookies", config.DOUYIN_COOKIES_FILE]
         cmd.append(v["url"])

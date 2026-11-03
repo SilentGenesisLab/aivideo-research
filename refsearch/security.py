@@ -64,6 +64,16 @@ def verify_file(path: str, exp: int, sig: str) -> bool:
     return exp >= time.time() and hmac.compare_digest(_sig(path, exp), sig)
 
 
+def sign_value(value: str, ttl: int = 3600) -> str:
+    """给任意值签一个 exp/sig 查询串：<video src> 这类浏览器不带请求头的场景用。"""
+    exp = int(time.time()) + ttl
+    return f"exp={exp}&sig={_sig(value, exp)}"
+
+
+def verify_value(value: str, exp: int, sig: str) -> bool:
+    return exp >= time.time() and hmac.compare_digest(_sig(value, exp), sig)
+
+
 def absolute(base_url: str, path: str) -> str:
     base = os.environ.get("PUBLIC_BASE_URL") or base_url
     return urljoin(base.rstrip("/") + "/", path.lstrip("/"))

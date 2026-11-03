@@ -12,23 +12,26 @@ import json
 import threading
 import time
 import uuid
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from pathlib import Path
 from typing import Literal
 
 import requests
-from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from refsearch import config, filters as flt, pipeline, platforms, player, security, stats, tasks
+from refsearch import (config, filters as flt, pipeline, platforms, player, resolve, security, stats,
+                       tasks)
 from refsearch.searchers import SOURCES
 
 UPLOADS = config.RUNS_DIR / "_uploads"
 STATUS = {"queued": "queued", "running": "running", "done": "succeeded", "error": "failed"}
+TTL_STREAM = 6 * 3600
 
 
 class ApiError(Exception):
@@ -118,6 +121,28 @@ class DownloadCreate(BaseModel):
 
 class RelayCreate(BaseModel):
     url: str = Field(description="视频页面地址")
+
+
+class ResolveCreate(BaseModel):
+    url: str = Field(description="作品链接：抖音 / 小红书 / B站 / YouTube / TikTok，支持各自短链")
+
+
+class ResolvedVideo(BaseModel):
+    platform: str = Field(description="douyin / xhs / bilibili / youtube / tiktok")
+    platform_name: str
+    video_id: str | None
+    title: str
+    author: str
+    duration: float | None = Field(None, description="秒")
+    cover: str = Field("", description="封面图地址")
+    page_url: str = Field(description="作品页面地址")
+    max_height: int | None = Field(None, description="解析到的清晰度；抖音接口不给")
+    desc: str | None = None
+    like: str | None = Field(None, description="仅小红书")
+    collect: str | None = Field(None, description="仅小红书")
+    comment: str | None = Field(None, description="仅小红书")
+    embed_url: str | None = Field(None, description="可放进 iframe 的官方播放器地址；没有时为 null")
+    stream_url: str = Field(description="服务器代理播放地址，支持 Range，可直接放进 <video src>")
 
 
 class Task(BaseModel):
@@ -697,6 +722,57 @@ def relay(p: RelayCreate, request: Request, who: str = Depends(client)):
     return {"task_id": tid, "status": "queued", "status_url": _abs(_base(request), f"/api/v1/tasks/{tid}")}
 
 
+@router.post("/resolve", response_model=ResolvedVideo, tags=["解析"],
+             summary="把一条作品链接解析成元数据 + 可播放地址（同步返回，抖音约 10 秒）")
+def resolve_link(p: ResolveCreate, request: Request):
+    """支持抖音、小红书、B站、YouTube、TikTok 及各自短链。视频号没有公开网页，不支持。
+    B站/YouTube 走服务器出口，境外机器对部分 B站投稿有地域限制。"""
+    try:
+        info = resolve.resolve_cached(p.url)
+    except resolve.ResolveError as e:
+        raise ApiError(400, "resolve_failed", str(e))
+    base = _base(request)
+    return {
+        **{k: info.get(k) for k in ("platform", "platform_name", "video_id", "title", "author", "duration",
+                                    "cover", "page_url", "max_height", "desc", "like", "collect", "comment")},
+        "embed_url": player.embed_url(info["page_url"]),
+        "stream_url": _abs(base, "/api/v1/resolve/stream?url=" + quote(info["page_url"], safe="")
+                           + "&" + security.sign_value(info["page_url"], TTL_STREAM)),
+    }
+
+
+# 播放链接要能直接放进 <video src>（浏览器不带请求头），所以不走 API Key，改签名校验
+pub = APIRouter()
+
+
+@pub.get("/resolve/stream", tags=["解析"], summary="代理播放：把解析到的视频以字节流转发（支持 Range）")
+def resolve_stream(url: str = Query(description="作品链接，或 POST /resolve 返回的 page_url"),
+                   exp: int = Query(description="签名过期时间（POST /resolve 返回的 stream_url 里已带）"),
+                   sig: str = Query(description="签名"),
+                   range: str | None = Header(None)):
+    """免登录，凭签名访问。直链能播就直接转发；TikTok 这类会对裸请求返回 403 的，
+    先用 yt-dlp 落一份 720p 缓存再发。"""
+    if not security.verify_value(url, exp, sig):
+        raise ApiError(403, "forbidden", "播放链接无效或已过期，重新调用 POST /resolve")
+    try:
+        info = resolve.resolve_cached(url)
+    except resolve.ResolveError as e:
+        raise ApiError(400, "resolve_failed", str(e))
+    up = resolve.open_upstream(info, range) if info.get("muxed", True) else None
+    if up is None:
+        try:
+            path = resolve.cache_local(info)
+        except resolve.ResolveError as e:
+            raise ApiError(502, "stream_failed", str(e))
+        return FileResponse(path, media_type="video/mp4")
+    headers = {k: up.headers[k] for k in ("Content-Length", "Content-Range", "Accept-Ranges", "Content-Type")
+               if k in up.headers}
+    headers["X-Accel-Buffering"] = "no"
+    return StreamingResponse(up.iter_content(1 << 18), status_code=up.status_code, headers=headers,
+                             media_type=up.headers.get("Content-Type", "video/mp4"),
+                             background=BackgroundTask(up.close))
+
+
 @router.get("/reference-platforms/items", response_model=list[PlatformItem], tags=["参考平台"],
             summary="直接抓取某个参考平台的作品（direct=true 的平台）")
 def platform_items(name: str = Query(description="reference_platforms[].name"),
@@ -719,6 +795,7 @@ api = FastAPI(
                  "`GET /tasks/{task_id}` 或通过 `callback_url` 接收回调。完整接入说明见 [接入文档](/developer)。"),
     docs_url="/docs", redoc_url="/redoc", openapi_url="/openapi.json")
 api.include_router(router)
+api.include_router(pub)
 
 
 def _err(status: int, code: str, message: str) -> JSONResponse:

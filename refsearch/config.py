@@ -34,8 +34,10 @@ TEXT_MODEL = os.environ.get("TEXT_MODEL", "deepseek-flash")
 # 可选：已登录 B 站的 cookie 字符串（至少含 SESSDATA），可显著降低搜索风控
 BILIBILI_COOKIE = os.environ.get("BILIBILI_COOKIE", "")
 
-# 可选：抖音下载所需的 cookies.txt（Netscape 格式，用浏览器插件 "Get cookies.txt" 导出）
-DOUYIN_COOKIES_FILE = os.environ.get("DOUYIN_COOKIES_FILE", "")
+# 可选：抖音 / 小红书解析所需的登录态 cookies（Netscape 格式，浏览器插件 "Get cookies.txt" 导出）
+SOCIAL_COOKIES_DIR = Path(os.environ.get("SOCIAL_COOKIES_DIR", ROOT / "data" / "cookies"))
+DOUYIN_COOKIES_FILE = os.environ.get("DOUYIN_COOKIES_FILE") or str(SOCIAL_COOKIES_DIR / "douyin_cookies.txt")
+XHS_COOKIES_FILE = os.environ.get("XHS_COOKIES_FILE") or str(SOCIAL_COOKIES_DIR / "xhs_cookies.txt")
 
 RUNS_DIR = Path(os.environ.get("RUNS_DIR", ROOT / "runs"))
 RUNS_DIR.mkdir(parents=True, exist_ok=True)

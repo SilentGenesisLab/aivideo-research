@@ -6,3 +6,4 @@ requests>=2.31
 imageio-ffmpeg>=0.5
 markdown>=3.5
 Pillow>=10
+playwright>=1.40
