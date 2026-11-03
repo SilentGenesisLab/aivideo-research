@@ -448,6 +448,8 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
 
 或 `{"top": 5}` 下载评分最高的 5 条。返回 `task_id`；完成后重新 `GET /runs/{run_id}`，对应视频的 `download.file_url` 即为 mp4。
 
+`urls` 必须取自该次检索结果的 `dimensions[].videos[].url`——不在结果里的地址会返回 `400 invalid_request`（"没有匹配到结果中的视频"）。只想下载单条链接时，用 `POST /resolve` 拿 `stream_url` 自行拉流。
+
 - 单条超过 3 分钟未完成会放弃，`download.error` 写明原因。
 - 抖音需要服务方配置 cookies；新片场、CulturePub 等少数站点不支持下载。
 
