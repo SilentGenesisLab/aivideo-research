@@ -193,7 +193,7 @@ def _info(url: str, platform: str) -> dict:
 
 
 def _dash(formats: list[dict]) -> dict | None:
-    """挑出 DASH 的音轨和视频轨。B站 的 CDN 在大陆直连就行，媒体不用走代理。"""
+    """挑出 DASH 的音轨和视频轨。"""
     vids = [f for f in formats if f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none")]
     auds = [f for f in formats if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")]
     if not vids or not auds:
@@ -413,7 +413,11 @@ def _stem(info: dict) -> str:
 
 
 def _dash_download(info: dict, out_dir: Path, stem: str) -> Path:
-    """B站 DASH：音轨视频轨分两条下载，再 ffmpeg 直接拷流封装。"""
+    """B站 DASH：音轨视频轨分两条下载，再 ffmpeg 直接拷流封装。
+
+    播放地址是解析时按请求方 IP 签发的（upsig/trid），大陆直接来取会 567 区域限制，
+    所以媒体也必须走同一条代理出去。
+    """
     d = info["dash"]
     ff = config.ffmpeg_path()
     if not ff:
@@ -422,7 +426,8 @@ def _dash_download(info: dict, out_dir: Path, stem: str) -> Path:
     try:
         for kind in ("video", "audio"):
             p = out_dir / f"{stem}.{kind}.part"
-            with requests.get(d[kind], headers=d.get("headers") or {}, stream=True, timeout=60) as r:
+            with requests.get(d[kind], headers=d.get("headers") or {}, stream=True, timeout=120,
+                              proxies=_proxies(info["platform"])) as r:
                 r.raise_for_status()
                 with open(p, "wb") as f:
                     for chunk in r.iter_content(1 << 20):
