@@ -1,6 +1,8 @@
 """第 2 步：视频平台检索。统一输出 Video 字典。
 
-- YouTube：yt-dlp 的 ytsearch（无需 API key）
+- YouTube：优先 YouTube Data API（配了 YOUTUBE_API_KEY），失败回退 yt-dlp 的 ytsearch
+- Google 广告透明度中心：官方前端 RPC，视频创意里的 YouTube id 直接可下载
+- Meta 广告资料库：Graph API ads_archive（需要身份验证过的 access token）
 - B 站：官方搜索接口，需 buvid3 + bili_ticket cookie 和 WBI 签名，否则触发风控
 """
 import hashlib
@@ -21,6 +23,15 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
 
+def _proxies(platform: str) -> dict | None:
+    """只有登记过的平台才走出口代理：抖音/小红书/优酷在国内直连更快。"""
+    if platform not in config.PROXY_PLATFORMS:
+        return None
+    p = config.proxy_for(platform)
+    return {"http": p, "https": p} if p else None
+
+
+
 def _video(platform, vid, url, title, channel="", duration=None, views=None,
            thumbnail="", description="", published=""):
     return {
@@ -32,10 +43,108 @@ def _video(platform, vid, url, title, channel="", duration=None, views=None,
 
 
 # ---------------- YouTube ----------------
-def search_youtube(query: str, limit: int = 8) -> list[dict]:
+# Data API 配额按单位计费：search.list = 100，videos.list = 1（每次最多 50 个 id）。
+# 默认 10000 单位/天 ≈ 100 次搜索，所以结果要缓存，且当天用完就回退 yt-dlp。
+_YT_QUOTA_FILE = config.RUNS_DIR / "_yt_quota.json"
+_YT_CACHE_DIR = config.RUNS_DIR / "_yt_cache"
+_yt_lock = threading.Lock()
+
+
+def _yt_cache_key(query: str, limit: int) -> str:
+    return hashlib.sha1(f"{query}|{limit}".encode()).hexdigest()
+
+
+def _yt_cache_get(query: str, limit: int) -> list[dict] | None:
+    p = _YT_CACHE_DIR / f"{_yt_cache_key(query, limit)}.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if time.time() - d.get("t", 0) > config.YOUTUBE_CACHE_TTL:
+        return None
+    return d.get("v")
+
+
+def _yt_cache_put(query: str, limit: int, videos: list[dict]) -> None:
+    try:
+        _YT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _YT_CACHE_DIR / f"{_yt_cache_key(query, limit)}.json"
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"t": time.time(), "v": videos}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
+    except OSError:
+        pass
+
+
+def _yt_take_quota(cost: int) -> bool:
+    day = time.strftime("%Y-%m-%d")
+    with _yt_lock:
+        try:
+            q = json.loads(_YT_QUOTA_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            q = {}
+        used = q.get(day, 0)
+        if used + cost > config.YOUTUBE_DAILY_QUOTA:
+            return False
+        tmp = _YT_QUOTA_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({day: used + cost}), encoding="utf-8")
+        tmp.replace(_YT_QUOTA_FILE)
+        return True
+
+
+def _iso_dur(s: str) -> int | None:
+    """PT1M30S → 90"""
+    m = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", s or "")
+    if not m:
+        return None
+    d, h, mi, se = (int(x or 0) for x in m.groups())
+    return d * 86400 + h * 3600 + mi * 60 + se
+
+
+def _youtube_api(query: str, limit: int) -> list[dict]:
+    if not _yt_take_quota(100):
+        raise RuntimeError("YouTube Data API 当日配额已用完")
+    r = requests.get("https://www.googleapis.com/youtube/v3/search", timeout=20,
+                     proxies=_proxies("youtube"),
+                     params={"key": config.YOUTUBE_API_KEY, "part": "snippet", "type": "video",
+                             "q": query, "maxResults": min(50, max(1, limit))})
+    j = r.json()
+    if "error" in j:
+        raise RuntimeError(j["error"].get("message", "YouTube API 错误"))
+    entries = j.get("items") or []
+    ids = [e.get("id", {}).get("videoId") for e in entries]
+    ids = [i for i in ids if i]
+    stats = {}
+    if ids and _yt_take_quota(1):
+        vr = requests.get("https://www.googleapis.com/youtube/v3/videos", timeout=20,
+                          proxies=_proxies("youtube"),
+                          params={"key": config.YOUTUBE_API_KEY,
+                                  "part": "contentDetails,statistics", "id": ",".join(ids)}).json()
+        stats = {v["id"]: v for v in vr.get("items") or []}
+    out = []
+    for e in entries:
+        vid = e.get("id", {}).get("videoId")
+        if not vid:
+            continue
+        sn = e.get("snippet") or {}
+        th = sn.get("thumbnails") or {}
+        thumb = (th.get("maxres") or th.get("high") or th.get("medium") or th.get("default") or {}).get("url")
+        v = stats.get(vid) or {}
+        out.append(_video(
+            "YouTube", vid, f"https://www.youtube.com/watch?v={vid}", sn.get("title", ""),
+            sn.get("channelTitle", ""), _iso_dur((v.get("contentDetails") or {}).get("duration")),
+            (v.get("statistics") or {}).get("viewCount"), thumb or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+            sn.get("description") or "", (sn.get("publishedAt") or "")[:10],
+        ))
+    return out
+
+
+def _youtube_ytdlp(query: str, limit: int) -> list[dict]:
     import yt_dlp
 
     opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+    if config.PROXY_URL:
+        opts["proxy"] = config.PROXY_URL
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
     out = []
@@ -49,6 +158,338 @@ def search_youtube(query: str, limit: int = 8) -> list[dict]:
             int(e["duration"]) if e.get("duration") else None, e.get("view_count"),
             thumbs[-1]["url"] if thumbs else f"https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg",
             e.get("description") or "",
+        ))
+    return out
+
+
+def search_youtube(query: str, limit: int = 8) -> list[dict]:
+    hit = _yt_cache_get(query, limit)
+    if hit is not None:
+        return hit
+    if config.YOUTUBE_API_KEY:
+        try:
+            out = _youtube_api(query, limit)
+        except Exception:
+            out = _youtube_ytdlp(query, limit)
+    else:
+        out = _youtube_ytdlp(query, limit)
+    if out:
+        _yt_cache_put(query, limit, out)
+    return out
+
+
+# ---------------- Google 广告透明度中心 ----------------
+# 没有官方 API，前端走 adstransparency.google.com/anji/_/rpc 的私有 RPC。
+# 视频创意本身不直接给 mp4，但预览 JS 里有 YouTube 视频 id，转成 watch 链接后
+# 就能复用平台的解析/下载链路（/resolve、下载队列都认识 YouTube）。
+_GADS = "https://adstransparency.google.com"
+_YTID_RE = re.compile(
+    r"(?:i\.ytimg\.com/vi/|youtu\.be/|youtube\.com/(?:watch\?v=|embed/|shorts/))([\w-]{11})")
+_MEDIA_RE = re.compile(r'https?://[^\s"\'<>\\]*(?:googlevideo\.com|\.mp4)[^\s"\'<>\\]*')
+# Google 对这个私有接口按 IP 限流，短时间批量取创意会被 429：放慢节奏、多出口轮换、结果缓存
+_GADS_PACE = {"lock": threading.Lock(), "last": 0.0}
+_GADS_GAP = 0.8
+_GADS_PROXY_IDX = [0]
+_GADS_RATE_HIT = {"t": 0.0}
+_GADS_BLOCK = {"until": 0.0}
+_GADS_CACHE_DIR = config.RUNS_DIR / "_gads_cache"
+
+
+def _gads_proxy() -> dict | None:
+    """gads 可以配多个出口轮换（GADS_PROXY_URLS），被限流时换下一个。"""
+    urls = config.GADS_PROXY_URLS or [config.proxy_for("gads")]
+    urls = [u for u in urls if u]
+    if not urls:
+        return None
+    p = urls[_GADS_PROXY_IDX[0] % len(urls)]
+    return {"http": p, "https": p}
+
+
+def _gads_http(method: str, url: str, **kw):
+    with _GADS_PACE["lock"]:  # 只拉开请求起点，网络等待不占锁
+        wait = _GADS_GAP - (time.time() - _GADS_PACE["last"])
+        if wait > 0:
+            time.sleep(wait)
+        _GADS_PACE["last"] = time.time()
+    r = requests.request(method, url, proxies=_gads_proxy(), **kw)
+    if r.status_code == 429:
+        _GADS_RATE_HIT["t"] = time.time()
+        _GADS_BLOCK["until"] = time.time() + 300  # 一段时间内直接放弃，别每个关键词都去撞墙
+        _GADS_PROXY_IDX[0] += 1  # 下次换出口
+    return r
+
+
+def _gads_rpc(path: str, body: dict) -> dict:
+    for attempt in range(2):
+        r = _gads_http("POST", _GADS + path, timeout=25, params={"authuser": ""},
+                       data={"f.req": json.dumps(body, separators=(",", ":"))},
+                       headers={"User-Agent": UA, "X-Same-Domain": "1",
+                                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                                "Origin": _GADS, "Referer": _GADS + "/"})
+        if r.status_code == 200:
+            text = r.text[4:] if r.text.startswith(")]}'") else r.text
+            return json.loads(text)
+        if r.status_code != 429:
+            break
+        time.sleep(2.5)
+    raise RuntimeError(f"Google 广告透明度接口返回 {r.status_code}")
+
+
+def _gads_advertiser(query: str) -> tuple[str, str] | None:
+    """关键词 → 广告主。品牌名通常在查询开头，所以从短到长试；都不行就当作域名查。"""
+    words = query.split()
+    for q in dict.fromkeys([words[0] if words else query, " ".join(words[:2]), query]):
+        if not q:
+            continue
+        try:
+            j = _gads_rpc("/anji/_/rpc/SearchService/SearchSuggestions", {"1": q, "2": 10, "3": 0})
+        except Exception as e:
+            if "429" in str(e):
+                return None
+            continue
+        for s in j.get("1") or []:
+            adv = s.get("1") or {}
+            if adv.get("2"):
+                return adv["2"], adv.get("1", "")
+    try:
+        j = _gads_rpc("/anji/_/rpc/SearchService/SearchCreatives",
+                      {"2": 40, "3": {"12": {"1": query}}, "7": {"1": 1}})
+    except Exception:
+        return None
+    for a in j.get("1") or []:
+        if a.get("1"):
+            return a["1"], a.get("12", "")
+    return None
+
+
+def _gads_media(preview_url: str) -> tuple[str, str]:
+    """预览编译产物里挖 YouTube id；挖不到再看有没有直链 mp4。返回 (url, 封面)。"""
+    try:
+        js = _gads_http("GET", preview_url, timeout=20, headers={"User-Agent": UA}).text
+    except Exception:
+        return "", ""
+    m = _YTID_RE.search(js)
+    if m:
+        vid = m.group(1)
+        return (f"https://www.youtube.com/watch?v={vid}",
+                f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg")
+    m = _MEDIA_RE.search(js)
+    return (m.group(0), "") if m else ("", "")
+
+
+def _yt_meta(url: str) -> dict:
+    try:
+        return requests.get("https://www.youtube.com/oembed", timeout=12,
+                            proxies=_proxies("youtube"),
+                            params={"url": url, "format": "json"}).json()
+    except Exception:
+        return {}
+
+
+def _gads_cache_get(query: str, limit: int) -> list[dict] | None:
+    p = _GADS_CACHE_DIR / f"{hashlib.sha1(f'{query}|{limit}'.encode()).hexdigest()}.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return d.get("v") if time.time() - d.get("t", 0) <= 21600 else None
+
+
+def _gads_cache_put(query: str, limit: int, videos: list[dict]) -> None:
+    try:
+        _GADS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _GADS_CACHE_DIR / f"{hashlib.sha1(f'{query}|{limit}'.encode()).hexdigest()}.json"
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"t": time.time(), "v": videos}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
+    except OSError:
+        pass
+
+
+def search_gads(query: str, limit: int = 8) -> list[dict]:
+    if time.time() < _GADS_BLOCK["until"]:
+        return []
+    hit = _gads_cache_get(query, limit)
+    if hit is not None:
+        return hit
+    adv = _gads_advertiser(query)
+    if not adv:
+        return []
+    aid, name = adv
+    try:
+        j = _gads_rpc("/anji/_/rpc/SearchService/SearchCreatives",
+                      {"2": min(100, max(limit * 5, 40)),
+                       "3": {"12": {"1": "", "2": True}, "13": {"1": [aid]}}, "7": {"1": 1}})
+    except Exception:
+        return []
+    items = [i for i in (j.get("1") or []) if i.get("4") == 3 and i.get("2")]
+    items = items[:min(len(items), max(limit * 3, 12))]
+
+    out, seen = [], set()
+    for it in items:  # 逐个取，命中限流就停：创意很多，没必要为凑数把 IP 打黑
+        if len(out) >= limit:
+            break
+        preview = ((it.get("3") or {}).get("1") or {}).get("4") or ""
+        if not preview:
+            continue
+        url, thumb = _gads_media(preview)
+        if time.time() - _GADS_RATE_HIT["t"] < 1:  # 刚被限流，这一轮不再请求
+            break
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        title, channel = "", ""
+        if "youtube.com" in url:
+            meta = _yt_meta(url)
+            title, channel = meta.get("title", ""), meta.get("author_name", "")
+        ts = ((it.get("6") or {}).get("1") or "")
+        published = time.strftime("%Y-%m-%d", time.localtime(int(ts))) if str(ts).isdigit() else ""
+        out.append(_video(
+            "Google广告透明度", it["2"], url, title or f"{name} 视频广告", channel or name,
+            None, None, thumb,
+            "Google 广告透明度中心的在投视频广告（按域名/关键词检索到的创意）", published))
+    if out:
+        _gads_cache_put(query, limit, out)
+    return out
+
+
+# ---------------- Meta 广告资料库 ----------------
+# 官方 Graph API：ads_archive。需要完成身份验证的 access token；
+# 国内直连不通，走出口代理。拿不到视频直链时退回 ad_snapshot_url（可打开原广告页）。
+_META_VID_RE = re.compile(r'"(?:video_hd_url|video_sd_url|video_url)"\s*:\s*"([^"]+)"')
+
+
+def _meta_video(snapshot_url: str) -> str:
+    if not snapshot_url:
+        return ""
+    try:
+        t = requests.get(snapshot_url, timeout=20, proxies=_proxies("meta"),
+                         headers={"User-Agent": UA}).text
+    except Exception:
+        return ""
+    m = _META_VID_RE.search(t)
+    return m.group(1).replace("\\/", "/") if m else ""
+
+
+def search_meta_ads(query: str, limit: int = 8) -> list[dict]:
+    hit = _gads_cache_get("meta:" + query, limit)
+    if hit is not None:
+        return hit
+    out = _meta_graph(query, limit) if config.META_AD_LIBRARY_TOKEN else _meta_scrape(query, limit)
+    if out:
+        _gads_cache_put("meta:" + query, limit, out)
+    return out
+
+
+# 没有 access token 时走公开广告库页面：渲染后用位置把 <video> 归属到广告卡片上。
+# 只有完成身份验证的开发者账号才能用 Graph API，而验证要等；这条路当天就能用。
+_META_CARD_ID = re.compile(r"Library ID:\s*(\d+)")
+_META_START = re.compile(r"Started running on (\w{3} \d{1,2}, \d{4})")
+
+
+def _meta_scrape(query: str, limit: int) -> list[dict]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return []
+    country = (config.META_AD_LIBRARY_COUNTRIES or ["US"])[0].strip() or "US"
+    url = ("https://www.facebook.com/ads/library/?active_status=active&ad_type=all"
+           f"&country={country}&search_type=keyword_unordered&media_type=video&q={urllib.parse.quote(query)}")
+    proxy = config.proxy_for("meta") or config.active_proxy()
+    if proxy.startswith("socks5h://"):  # Chromium 不认 socks5h，它不支持代理侧解析 DNS
+        proxy = "socks5://" + proxy[len("socks5h://"):]
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True,
+                                         proxy={"server": proxy} if proxy else None)
+            page = browser.new_context(
+                locale="en-US", viewport={"width": 1400, "height": 1000},
+                user_agent=UA).new_page()
+            page.goto(url, timeout=90000, wait_until="domcontentloaded")
+            page.wait_for_timeout(8000)
+            for _ in range(2):  # 往下滚两屏，够 limit 条就停
+                page.mouse.wheel(0, 2500)
+                page.wait_for_timeout(2200)
+            raw = page.evaluate("""() => {
+              const cards = [];
+              for (const d of document.querySelectorAll('div')) {
+                const t = d.innerText || '';
+                if (!/Library ID:\\s*\\d+/.test(t) || t.length > 1200) continue;
+                const r = d.getBoundingClientRect();
+                cards.push({text: t, top: r.top, bottom: r.bottom});
+              }
+              const vids = [...document.querySelectorAll('video')].map(v => {
+                const r = v.getBoundingClientRect();
+                return {src: v.src || v.currentSrc || '', top: r.top, bottom: r.bottom};
+              });
+              return {cards, vids};
+            }""")
+            browser.close()
+    except Exception:
+        return []
+
+    out, seen = [], set()
+    for v in raw.get("vids") or []:
+        if len(out) >= limit or not v.get("src"):
+            continue
+        mid = (v["top"] + v["bottom"]) / 2
+        # 位置落在哪个卡片里就归给谁；卡片有嵌套，取最内层（最矮）的那张
+        hits = sorted((c for c in raw.get("cards") or []
+                       if c["top"] - 40 <= mid <= c["bottom"] + 40),
+                      key=lambda c: c["bottom"] - c["top"])
+        if not hits:
+            continue
+        text = hits[0]["text"]
+        m = _META_CARD_ID.search(text)
+        if not m or m.group(1) in seen:
+            continue
+        seen.add(m.group(1))
+        lines = [x.strip() for x in text.split("\n") if x.strip()]
+        page_name, body = "", ""
+        if "Sponsored" in lines:
+            i = lines.index("Sponsored")
+            page_name = lines[i - 1] if i else ""
+            rest = [x for x in lines[i + 1:] if x not in ("See ad details", "Open Dropdown",
+                                                          "This ad has multiple versions")]
+            body = rest[0] if rest else ""
+        start = _META_START.search(text)
+        published = ""
+        if start:
+            try:
+                published = time.strftime("%Y-%m-%d", time.strptime(start.group(1), "%b %d, %Y"))
+            except ValueError:
+                published = ""
+        out.append(_video(
+            "Meta 广告库", m.group(1), v["src"].split("&bytestart")[0].split("&byteend")[0],
+            (body or f"{page_name} 视频广告")[:120], page_name, None, None, "",
+            f"Meta 广告资料库在投视频广告；广告主：{page_name}；开始投放：{published or '未知'}。素材文案：{body}",
+            published))
+    return out
+
+
+def _meta_graph(query: str, limit: int) -> list[dict]:
+    countries = [c.strip() for c in config.META_AD_LIBRARY_COUNTRIES if c.strip()]
+    r = requests.get(
+        f"https://graph.facebook.com/{config.META_AD_LIBRARY_VERSION}/ads_archive",
+        timeout=25, proxies=_proxies("meta"),
+        params={"access_token": config.META_AD_LIBRARY_TOKEN, "search_terms": query,
+                "ad_reached_countries": json.dumps(countries), "ad_type": "ALL",
+                "fields": ("id,page_name,ad_creative_bodies,ad_snapshot_url,"
+                           "ad_delivery_start_time,ad_delivery_stop_time,publisher_platforms"),
+                "limit": min(50, max(1, limit * 2))})
+    j = r.json()
+    if "error" in j:
+        raise RuntimeError(j["error"].get("message", "Meta 广告资料库错误"))
+    out = []
+    for it in (j.get("data") or [])[:limit]:
+        body = (it.get("ad_creative_bodies") or [""])[0]
+        snap = it.get("ad_snapshot_url") or ""
+        out.append(_video(
+            "Meta 广告库", it.get("id", ""), _meta_video(snap) or snap,
+            body[:120] or it.get("page_name", ""), it.get("page_name", ""),
+            None, None, "",
+            f"Meta 广告资料库在投视频广告；广告主：{it.get('page_name', '')}。素材文案：{body}",
+            (it.get("ad_delivery_start_time") or "")[:10],
         ))
     return out
 
@@ -402,6 +843,9 @@ SOURCES = {
                       "Ads of the World", "广告案例库"),
     "adweek": (_site("adweek.com", ("adweek video", "adweek"), "www.bing.com"), ("en",), "Adweek", "广告案例库"),
     "culturepub": (_site("culturepub.fr", ("culturepub",), "www.bing.com"), ("en",), "CulturePub", "广告案例库"),
+    # 投放侧广告库：看竞品正在投什么
+    "gads": (search_gads, ("en",), "Google 广告透明度", "广告案例库"),
+    "meta_ads": (search_meta_ads, ("en",), "Meta 广告库", "广告案例库"),
 }
 SEARCHERS = {k: (v[0], v[1]) for k, v in SOURCES.items()}
 SOURCE_NAMES = {k: v[2] for k, v in SOURCES.items()}

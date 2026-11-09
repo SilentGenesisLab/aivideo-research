@@ -119,7 +119,7 @@ def _netscape(path: Path) -> list[dict]:
 
 def _proxy(platform: str) -> str:
     """海外平台走出口代理；大陆机器直连不了 YouTube / TikTok。"""
-    return config.PROXY_URL if platform in config.PROXY_PLATFORMS else ""
+    return config.proxy_for(platform) if platform in config.PROXY_PLATFORMS else ""
 
 
 def _proxies(platform: str) -> dict | None:

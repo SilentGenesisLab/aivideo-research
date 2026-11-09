@@ -58,7 +58,11 @@ def load_partial(run_id: str) -> dict | None:
         return None
 
 
-DEFAULT_SOURCES = tuple(SOURCES)
+# 依赖外部凭证/出口的来源不参与默认检索：gads 限流紧、meta_ads 需要 access token。
+# 显式传 sources 时仍可调用。
+DEFAULT_SOURCES = tuple(
+    k for k in SOURCES if k != "gads" and (k != "meta_ads" or config.META_AD_LIBRARY_TOKEN)
+)
 RANK_BATCH = 25
 # 检索深度：每个维度每种语言几个关键词、每个关键词每个渠道取几条、每个维度最多送多少条给 AI 打分（控制成本）
 DEPTHS = {

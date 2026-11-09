@@ -16,7 +16,7 @@
 |---|---|
 | 产品画像 | 品牌、产品名、品类、外观、卖点、目标人群、调性、竞品 |
 | 5 个参考维度 | 同品类 / 竞品 / 情绪主题 / 结构形式 / 获奖标杆，每个维度写明“参考什么”和检索关键词 |
-| 参考视频 | 每个维度最多 10 条，来自 B 站、抖音、优酷、YouTube、数英、iSpot.tv 等 16 个渠道；每条有 AI 评分（0~10）、是否广告正片、**具体参考点**、可内嵌的播放地址 |
+| 参考视频 | 每个维度最多 10 条，来自 B 站、抖音、优酷、YouTube、数英、iSpot.tv 等 18 个渠道（默认检索 16 个，Google 广告透明度中心与 Meta 广告资料库需显式选择）；每条有 AI 评分（0~10）、是否广告正片、**具体参考点**、可内嵌的播放地址 |
 | 参考平台 | 15 个人工补充检索的平台及搜索链接，其中 7 个可通过接口直接取作品 |
 | 可选下载 | 指定视频下载为 mp4（H.264/AAC），返回限时下载链接 |
 | 单条链接解析 | 给一条抖音 / 小红书 / B站 / YouTube / TikTok 链接，直接返回元数据 + 可播放地址（见 5.12） |
@@ -173,7 +173,11 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 ]
 ```
 
-当前 16 个渠道：`bilibili` `douyin` `youku` `tencent` `iqiyi` `acfun` `web_cn` `youtube` `dailymotion` `web_intl` `digitaling` `xinpianchang` `ispot` `adsoftheworld` `adweek` `culturepub`。以接口返回为准。
+当前 18 个渠道：`bilibili` `douyin` `youku` `tencent` `iqiyi` `acfun` `web_cn` `youtube` `dailymotion` `web_intl` `digitaling` `xinpianchang` `ispot` `adsoftheworld` `adweek` `culturepub` `gads` `meta_ads`。以接口返回为准。
+
+- `gads`（Google 广告透明度中心）和 `meta_ads`（Meta 广告资料库）默认不参与批量检索：两者都要额外出口、单次耗时明显更长。显式传 `sources` 时才调用。
+- `gads` 返回的是 YouTube 链接（视频创意的预览里带视频 id），可以直接走 `/resolve` 和下载。同一关键词结果缓存 6 小时。
+- `meta_ads` 有两种模式：配置 `META_AD_LIBRARY_TOKEN` 时走官方 Graph API（字段全、快）；不配置时渲染公开广告库页面取在投视频（约 15 秒，结果缓存 6 小时）。两种模式返回的都是可直接下载的 mp4 直链。
 
 ### 5.1.1 GET /video-types
 
@@ -715,7 +719,7 @@ def callback():
 
 | 项 | 说明 |
 |---|---|
-| 检索耗时 | 全部 16 个渠道约 1~3 分钟；只选 3~5 个渠道约 30~60 秒。只选 B站 时约 30~60 秒；含 YouTube 的检索明显更慢（要走出口代理，实测 quick + B站/YouTube 约 3.5 分钟） |
+| 检索耗时 | 默认 16 个渠道约 1~3 分钟；只选 3~5 个渠道约 30~60 秒。只选 B站 时约 30~60 秒；含 YouTube 的检索明显更慢（要走出口代理）。`gads` 受 Google 限流，只适合单个关键词按需查询（结果缓存 6 小时），不要放进批量检索 |
 | 并发 | 同时执行的检索默认 2 个（服务方可调），其余排队；第 3 个起 `queue_position` > 0 |
 | 轮询频率 | 建议 3~5 秒一次 |
 | 图片 | jpg / png / webp，≤ 15MB；包装正面、背景干净时识别最准 |
@@ -752,6 +756,17 @@ def callback():
 | `SIGNING_SECRET` | 否 | 文件签名密钥；不配置时自动生成并保存在 `runs/.signing_secret` |
 | `FILE_URL_TTL` | 否 | 文件链接有效期（秒），默认 604800（7 天） |
 | `SEARCH_WORKERS` | 否 | 同时执行的检索数，默认 2 |
+| `YOUTUBE_API_KEY` | 否 | YouTube Data API v3 key。配置后 YouTube 搜索走官方接口（无风控、字段全），失败或配额用完自动回退 yt-dlp |
+| `YOUTUBE_DAILY_QUOTA` | 否 | 每天配额单位，默认 10000；`search.list` 每次 100，`videos.list` 每次 1。按天记录在 `runs/_yt_quota.json` |
+| `YOUTUBE_CACHE_TTL` | 否 | 同一关键词搜索结果缓存秒数，默认 21600（6 小时） |
+| `META_AD_LIBRARY_TOKEN` | 否 | Meta 广告资料库 access token（需完成身份验证的开发者账号）。不配置时改渲染公开广告库页面，仍能取到在投视频 |
+| `META_AD_LIBRARY_VERSION` | 否 | Graph API 版本，默认 `v23.0` |
+| `META_AD_LIBRARY_COUNTRIES` | 否 | 投放国家代码，逗号分隔，默认 `US,GB,DE,FR,JP` |
+| `PROXY_URL` | 否 | 出口代理（`socks5h://` 让 DNS 也在代理侧解析）。只有 youtube/tiktok/bilibili/gads/meta 走代理 |
+| `PROXY_URLS` | 否 | 多个出口，逗号分隔，按顺序探测自动切换 |
+| `DOWNLOAD_PROXY_URL` / `DOWNLOAD_PROXY_URLS` | 否 | 下载专用出口；不配置时与搜索共用 |
+| `PLATFORM_PROXY` | 否 | 按平台指定出口，如 `gads=socks5h://127.0.0.1:1083,meta=socks5h://127.0.0.1:1083` |
+| `GADS_PROXY_URLS` | 否 | Google 广告透明度中心的出口池（逗号分隔），被限流时轮换 |
 
 修改后重启服务（`docker compose up -d` 或 `./start.sh`）。
 
