@@ -426,7 +426,7 @@ def cache_local(info: dict, max_height: int = 720) -> Path:
 
 def prewarm(info: dict) -> None:
     """解析成功后先把要合并的片子拉到本地：首帧请求才不会卡着等 yt-dlp。"""
-    if info.get("muxed", True):
+    if info.get("muxed", True) or config.EDGE_MODE:  # edge 模式：不预拉，播放时才按需拉到内存盘
         return
     try:
         cache_local(info)

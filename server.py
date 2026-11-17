@@ -467,7 +467,7 @@ class CachedStatic(StaticFiles):
 
 app.mount("/api/v1", api_v1.api)
 app.mount("/static", CachedStatic(directory=WEB), name="static")
-app.mount("/runs", StaticFiles(directory=config.RUNS_DIR), name="runs")
+app.mount("/runs", StaticFiles(directory=config.RUNS_DIR, follow_symlink=config.EDGE_MODE), name="runs")  # edge 模式：_cache 指向内存盘
 
 class SelectiveGZip:
     """压缩页面、脚本和 JSON；视频、图片、下载文件不压缩（已是压缩格式，且要支持断点续传）。"""

@@ -27,7 +27,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from refsearch import (config, filters as flt, pipeline, platforms, player, resolve, security, stats,
+from refsearch import (config, edge, filters as flt, pipeline, platforms, player, resolve, security, stats,
                        tasks, webgrab)
 from refsearch.searchers import SOURCES
 from refsearch import video_generation, video_work
@@ -131,6 +131,8 @@ class RelayCreate(BaseModel):
 
 class ResolveCreate(BaseModel):
     url: str = Field(description="作品链接：抖音 / 小红书 / B站 / YouTube / TikTok，支持各自短链")
+    direct: bool = Field(False, description="true 时额外返回 CDN 直链和请求头（direct 字段），供 4090 等边缘端直连源站下载，视频字节不经过本服务；"
+                                            "直链短时有效；YouTube / TikTok 的直链绑定本机出口 IP，不返回")
 
 
 class ResolvedVideo(BaseModel):
@@ -149,6 +151,7 @@ class ResolvedVideo(BaseModel):
     comment: str | None = Field(None, description="仅小红书")
     embed_url: str | None = Field(None, description="可放进 iframe 的官方播放器地址；没有时为 null")
     stream_url: str = Field(description="服务器代理播放地址，支持 Range，可直接放进 <video src>")
+    direct: dict | None = Field(None, description="仅 direct=true 且平台支持时返回：video_url / audio_url（DASH 才有）/ headers / muxed")
 
 
 class Task(BaseModel):
@@ -244,6 +247,7 @@ class Run(BaseModel):
     options: dict = Field(description="本次使用的检索参数：depth/target_count/per_query/top_per_dim/min_score/max_duration")
     stats: dict = Field(description="queries/raw/kept/seconds；target 目标数量、eligible 达标总数、filtered 各原因筛掉的条数")
     errors: list[str]
+    edge_notes: list[dict] = Field(default_factory=list, description="边缘端（4090）回传的视频笔记：视频本体路径指针、媒体事实、镜头统计、分析结论；没有时为空")
 
 
 class RunSummary(BaseModel):
@@ -340,6 +344,7 @@ def run_out(r: dict, base: str) -> dict:
                                 for p in r.get("platform_links", [])],
         "filters": flt.normalize(r.get("filters")), "options": r.get("options") or {},
         "stats": r.get("stats", {}), "errors": r.get("errors", []),
+        "edge_notes": edge.load(rid),
     }
 
 
@@ -670,6 +675,40 @@ def create_download(run_id: str, p: DownloadCreate, request: Request, who: str =
     return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
 
 
+class EdgeNote(BaseModel):
+    url: str = Field(max_length=4096, description="视频原始链接（与检索结果里的 url 一致）")
+    status: Literal["ok", "failed", "skipped"] = "ok"
+    reason: str | None = Field(None, max_length=500, description="failed / skipped 的原因")
+    path: str | None = Field(None, max_length=500, description="视频在边缘端的路径（指针，不是文件）")
+    sha256: str | None = Field(None, max_length=64)
+    size_mb: float | None = None
+    media: dict | None = Field(None, description="媒体事实：时长、分辨率、帧率、编码、有无音轨…")
+    shots: dict | None = Field(None, description="镜头统计：数量、平均时长、切点秒数")
+    summary: str | None = Field(None, max_length=4000, description="边缘端做完的分析结论（文字）")
+
+
+class EdgeNotesCreate(BaseModel):
+    host: str = Field("gpu4090", max_length=64, description="回传笔记的边缘端名称")
+    items: list[EdgeNote] = Field(min_length=1, max_length=50)
+
+
+@router.post("/runs/{run_id}/edge-notes", tags=["边缘回传"],
+             summary="边缘端回传视频笔记（只收结论与指针，不收视频字节；同一 url 再传会覆盖）")
+def post_edge_notes(run_id: str, p: EdgeNotesCreate, who: str = Depends(client)):
+    _own_run(run_id, who)
+    try:
+        items = edge.merge(run_id, [i.model_dump(exclude_none=True) for i in p.items], p.host)
+    except ValueError as e:
+        raise ApiError(413, "too_large", str(e))
+    return {"run_id": run_id, "count": len(items)}
+
+
+@router.get("/runs/{run_id}/edge-notes", tags=["边缘回传"], summary="读取边缘端回传的视频笔记")
+def get_edge_notes(run_id: str, who: str = Depends(client)):
+    _own_run(run_id, who)
+    return {"run_id": run_id, "items": edge.load(run_id)}
+
+
 class LibraryVideo(BaseModel):
     platform: str
     url: str
@@ -748,12 +787,22 @@ def resolve_link(p: ResolveCreate, request: Request):
     # 解析一返回就在后台先拉好，人点播放时通常已就绪
     threading.Thread(target=resolve.prewarm, args=(info,), daemon=True).start()
     return {
+        "direct": _direct_info(info) if p.direct else None,
         **{k: info.get(k) for k in ("platform", "platform_name", "video_id", "title", "author", "duration",
                                     "cover", "page_url", "max_height", "desc", "like", "collect", "comment")},
         "embed_url": player.embed_url(info["page_url"]),
         "stream_url": _abs(base, "/api/v1/resolve/stream?url=" + quote(info["page_url"], safe="")
                            + "&" + security.sign_value(info["page_url"], TTL_STREAM)),
     }
+
+
+def _direct_info(info: dict) -> dict | None:
+    """CDN 直链给边缘端直连下载用；YouTube / TikTok 的直链绑定解析时的出口 IP，换机器用不了，不给。"""
+    if info.get("platform") in ("youtube", "tiktok"):
+        return None
+    d = info.get("dash") or {}
+    return {"video_url": d.get("video") or info["video_url"], "audio_url": d.get("audio"),
+            "headers": d.get("headers") or info.get("headers") or {}, "muxed": bool(info.get("muxed", True))}
 
 
 # 播放链接要能直接放进 <video src>（浏览器不带请求头），所以不走 API Key，改签名校验
