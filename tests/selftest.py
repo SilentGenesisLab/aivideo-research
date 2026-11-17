@@ -324,12 +324,42 @@ def offline_acfun():
     check("AcFun：不出现带网页源码的标题", all("<" not in v["title"] and len(v["title"]) <= 200 for v in got), got)
 
 
+def offline_global_search():
+    """全域搜索：站点解析、站内过滤、登录页判定、必应标题相关性。"""
+    from refsearch import webgrab
+    from refsearch.searchers import _title_matches
+    keys = [x["key"] for x in webgrab.resolve_sites(["all"])]
+    check("全域搜索：all 展开为全部登记站点", len(keys) == len(webgrab.SITES) == len(set(keys)) >= 24, keys)
+    got = webgrab.resolve_sites(["知乎", "Reddit", "adquan.com", "zhihu", "https://www.foo.cn/a"])
+    check("全域搜索：中文名/大小写/域名/去重", [x["key"] for x in got] == ["zhihu", "reddit", "adquan.com", "www.foo.cn"], got)
+    for bad in ([], [""], ["nosuch site"], ["a b"]):
+        try:
+            webgrab.resolve_sites(bad)
+            ok = False
+        except webgrab.WebGrabError as e:
+            ok = e.code == "invalid_sites"
+        check(f"全域搜索：非法 sites {bad} 报 invalid_sites", ok)
+    check("全域搜索：站内过滤只认域名及子域", webgrab._on_site("https://m.okjike.com/x", ["okjike.com"])
+          and not webgrab._on_site("https://notokjike.com/x", ["okjike.com"])
+          and not webgrab._on_site("https://a.com/?u=okjike.com", ["okjike.com"]))
+    check("登录/风控页判失败：小红书", webgrab._vet({"ok": True, "text": "x 当前笔记暂时无法浏览 请打开小红书App扫码查看"})["ok"] is False)
+    check("登录/风控页：抖音页脚只在正文很短时判失败",
+          webgrab._vet({"ok": True, "text": "x" * 500 + "服务器出现问题 请稍后重试"})["ok"] is False
+          and webgrab._vet({"ok": True, "text": "x" * 5000 + "服务器出现问题 请稍后重试"})["ok"] is True)
+    check("登录/风控页：已失败的结果原样返回", webgrab._vet({"ok": False, "error": "e"}) == {"ok": False, "error": "e"})
+    check("必应标题相关性：不带空格的中文关键词", _title_matches("盼了这么久！元气森林重磅新品气泡水", "元气森林气泡水广告"))
+    check("必应标题相关性：无关标题不通过", not _title_matches("今天做红烧肉教程", "元气森林气泡水广告"))
+    check("必应标题相关性：泛词不算命中", not _title_matches("某某品牌广告大赏", "元气森林气泡水广告"))
+    check("必应标题相关性：空格分词仍然有效", _title_matches("Nike 2026 Commercial", "nike commercial"))
+
+
 if __name__ == "__main__":
     offline()
     offline_filters()
     offline_depth()
     offline_text()
     offline_acfun()
+    offline_global_search()
     if len(sys.argv) > 1:
         online(sys.argv[1])
     print(f"\n通过 {len(PASS)}，失败 {len(FAIL)}" + (f"：{FAIL}" if FAIL else ""))
