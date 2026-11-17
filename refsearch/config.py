@@ -107,6 +107,13 @@ META_AD_LIBRARY_VERSION = os.environ.get("META_AD_LIBRARY_VERSION", "v23.0")
 META_AD_LIBRARY_COUNTRIES = os.environ.get(
     "META_AD_LIBRARY_COUNTRIES", "US,GB,DE,FR,JP").split(",")
 
+
+# 网页正文解析服务（WebGrab）：接入其它站点的文章正文
+WEBGRAB_BASE = (os.environ.get("WEBGRAB_BASE") or "https://chorify3.sligenai.cn/grab").rstrip("/")
+WEBGRAB_TOKEN = os.environ.get("WEBGRAB_TOKEN", "")
+WEBGRAB_TIMEOUT = int(os.environ.get("WEBGRAB_TIMEOUT") or 180)
+WEBGRAB_WORKERS = int(os.environ.get("WEBGRAB_WORKERS") or 4)
+
 RUNS_DIR = Path(os.environ.get("RUNS_DIR", ROOT / "runs"))
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 

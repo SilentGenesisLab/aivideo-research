@@ -20,6 +20,7 @@
 | 参考平台 | 15 个人工补充检索的平台及搜索链接，其中 7 个可通过接口直接取作品 |
 | 可选下载 | 指定视频下载为 mp4（H.264/AAC），返回限时下载链接 |
 | 单条链接解析 | 给一条抖音 / 小红书 / B站 / YouTube / TikTok 链接，直接返回元数据 + 可播放地址（见 5.12） |
+| 网页正文 | 给任意网页地址，返回正文纯文本；或按关键词全网检索并带回全文（见 5.14） |
 
 一次检索约 **1~3 分钟**，所以检索、下载、中转都是**异步任务**。只有单条链接解析（`POST /resolve`）是同步的，2~10 秒返回。
 
@@ -606,6 +607,80 @@ curl -X POST https://videodata.sligenai.cn/api/v1/resolve \
 - 支持 `Range: bytes=0-`，可拖动进度；返回 `206 Partial Content` 和 `video/mp4`。
 - 签名错误或过期返回 `403 forbidden`，重新调用 `POST /resolve` 即可。
 - 直连能拿到字节流的平台（抖音、小红书、B站、YouTube）边下边转；TikTok 这类对裸请求返回 403 的，先用服务端缓存一份 720p 再发。
+
+### 5.14 网页内容检索（`/pages`）
+
+不止视频——**任意网页的正文**也能从这里取。服务端接的是一个统一解析器：按域名自动选路（静态直取 / 无头浏览器 / 前端被拦时改走后端接口），失败逐级降级。
+
+和检索视频不同的是，这几个接口是**同步**的：直接返回正文，不产生 task_id。
+
+#### `POST /pages/read`（批量取正文，最多 20 条）
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/pages/read \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"urls":["https://mp.weixin.qq.com/s/xxx","https://medium.com/about"]}'
+```
+
+```json
+{"results":[
+  {"url":"…","ok":true,"via":"http","chars":1751,"ms":898,"text":"正文纯文本…"},
+  {"url":"…","ok":false,"error":"所有抓取通道均失败：…"}
+]}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `urls` | 目标地址，1~20 条 |
+| `refresh` | 可选，`true` 跳过 30 分钟缓存 |
+
+单条失败不影响其他条。并发 4 路取，20 条约 1~3 分钟（取决于有多少条要走浏览器）。
+
+#### `GET /pages/read`（取单页）
+
+```bash
+curl "https://videodata.sligenai.cn/api/v1/pages/read?url=https%3A%2F%2Fmedium.com%2Fabout" \
+  -H "X-API-Key: $KEY"
+```
+
+返回同上单条结构。
+
+#### `POST /pages/search`（全网检索，可带全文）
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"query":"AI 视频 广告 创意","n":5,"raw":true}'
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `query` | — | 检索词 |
+| `n` | 10 | 1~20 条 |
+| `raw` | true | 每条是否带 `raw_content` 全文 |
+
+#### `GET /pages/sources`（能力清单）
+
+返回服务端是否启用、以及每个站点能不能读、走哪条通道，前端可据此提示用户。
+
+#### `via` 通道含义
+
+| 值 | 含义 | 耗时 |
+|---|---|---|
+| `http` | 静态页直取（公众号等） | ~0.7s |
+| `tavily` | 境外站、YouTube 转录 | ~0.7s |
+| `chrome` | 需要 JS 或登录态 | 8~15s |
+| `api` | 前端被 WAF 拦，改走后端接口（掘金文章页、X 单条推文） | 0.1~0.4s |
+
+`via` 可能写成 `tavily-junk>chrome`，表示 Tavily 抓到的是验证页，已自动降级到浏览器。
+
+**验证页不会当成功返回。** 人机验证页、`Access Denied`、登录墙一律判为失败并继续降级；全部失败时该条 `ok=false`，`error` 里是降级链。
+
+#### 覆盖范围（实测）
+
+能读：公众号、少数派、InfoQ、腾讯云社区、36氪、CSDN、小红书、B站、微博、头条、抖音、掘金文章、GitHub、arXiv、Substack、Hacker News、Medium、Reddit、LinkedIn、YouTube（返回字幕转录）、掘金、X 单条推文。
+
+不能读：**知乎**（机房 IP 直接 403，需登录态）、**即刻**（网页是登录二维码页）、**X 主页/时间线**（登录墙）。
 
 ## 6. 在你的页面里播放视频
 

@@ -26,7 +26,7 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from pydantic import BaseModel, Field
 
 from refsearch import (config, filters as flt, pipeline, platforms, player, resolve, security, stats,
-                       tasks)
+                       tasks, webgrab)
 from refsearch.searchers import SOURCES
 
 UPLOADS = config.RUNS_DIR / "_uploads"
@@ -788,6 +788,104 @@ def platform_items(name: str = Query(description="reference_platforms[].name"),
         raise ApiError(502, "upstream_error", f"抓取失败：{e}"[:300])
     return [{**{k: it.get(k) for k in ("platform", "url", "title", "thumbnail", "duration")},
              "media": it.get("media", "video")} for it in items]
+
+
+# ---------------- 网页内容检索（WebGrab）----------------
+class PageReadRequest(BaseModel):
+    urls: list[str] = Field(..., min_length=1, max_length=20, description="目标网页地址，最多 20 个")
+    refresh: bool = Field(False, description="true 时跳过 WebGrab 的 30 分钟缓存")
+
+
+class PageResult(BaseModel):
+    url: str
+    ok: bool
+    via: str | None = Field(None, description="实际抓取通道：http / tavily / chrome / api")
+    chars: int | None = Field(None, description="正文字符数")
+    ms: int | None = None
+    text: str | None = Field(None, description="正文纯文本，ok=false 时为空")
+    error: str | None = Field(None, description="ok=false 时的失败原因")
+
+
+class PageReadResponse(BaseModel):
+    results: list[PageResult]
+
+
+class PageSearchRequest(BaseModel):
+    query: str = Field(..., description="检索词")
+    n: int = Field(10, ge=1, le=20, description="返回条数")
+    raw: bool = Field(True, description="是否返回每条网页的正文")
+
+
+class PageSearchItem(BaseModel):
+    title: str = ""
+    url: str = ""
+    content: str = Field("", description="摘要")
+    raw_content: str | None = Field(None, description="正文，raw=true 时有值")
+
+
+class PageSearchResponse(BaseModel):
+    query: str
+    count: int
+    results: list[PageSearchItem]
+
+
+class PageCapability(BaseModel):
+    site: str
+    ok: bool
+    via: str | None = None
+    note: str | None = None
+
+
+class PageSources(BaseModel):
+    enabled: bool = Field(..., description="服务端是否配置了 WebGrab")
+    base: str
+    capabilities: list[PageCapability]
+
+
+@router.get("/pages/sources", response_model=PageSources, tags=["网页内容"],
+            summary="网页检索能力：哪些站点能读、走什么通道")
+def page_sources():
+    return {"enabled": webgrab.enabled(), "base": webgrab.BASE,
+            "capabilities": webgrab.CAPABILITIES}
+
+
+@router.post("/pages/read", response_model=PageReadResponse, tags=["网页内容"],
+             summary="取网页正文（批量，最多 20 条，单条失败不影响其他条）")
+def pages_read(p: PageReadRequest):
+    if not webgrab.enabled():
+        raise ApiError(503, "webgrab_disabled", "服务端未配置 WEBGRAB_TOKEN")
+    try:
+        return {"results": webgrab.read_many(p.urls, p.refresh)}
+    except webgrab.WebGrabError as e:
+        raise ApiError(502, e.code, e.message)
+
+
+@router.get("/pages/read", response_model=PageResult, tags=["网页内容"], summary="取单个网页正文")
+def page_read(url: str = Query(..., description="目标网页地址"),
+              refresh: bool = Query(False, description="跳过缓存")):
+    if not webgrab.enabled():
+        raise ApiError(503, "webgrab_disabled", "服务端未配置 WEBGRAB_TOKEN")
+    try:
+        r = webgrab.read(url, refresh)
+    except webgrab.WebGrabError as e:
+        code = 502 if e.code == "page_unavailable" else 400
+        raise ApiError(code, e.code, e.message)
+    return r
+
+
+@router.post("/pages/search", response_model=PageSearchResponse, tags=["网页内容"],
+             summary="全网网页检索（Tavily，可带全文）")
+def pages_search(p: PageSearchRequest):
+    if not webgrab.enabled():
+        raise ApiError(503, "webgrab_disabled", "服务端未配置 WEBGRAB_TOKEN")
+    try:
+        items = webgrab.search(p.query, p.n, p.raw)
+    except webgrab.WebGrabError as e:
+        raise ApiError(502, e.code, e.message)
+    return {"query": p.query, "count": len(items),
+            "results": [{"title": it.get("title") or "", "url": it.get("url") or "",
+                         "content": it.get("content") or "",
+                         "raw_content": it.get("raw_content")} for it in items]}
 
 
 # ---------------- 子应用：独立的 OpenAPI 文档 ----------------
