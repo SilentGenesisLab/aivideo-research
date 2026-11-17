@@ -184,6 +184,12 @@ def run_search(image_path: str | None, brief: str = "", platforms=DEFAULT_SOURCE
 
     with ThreadPoolExecutor(max_workers=12) as ex:
         raw = [v for vids in ex.map(do, tasks) for v in vids]
+    # 渠道“成功但一条没有”往往是接口失效或被限流，不能当作正常结果静默吞掉
+    for pf in platforms:
+        name = SOURCE_NAMES[pf]
+        n_tasks = sum(1 for t in tasks if t[1] == pf)
+        if n_tasks and searched.get(name, 0) == 0 and not any(e.startswith(name + " ") for e in errors):
+            errors.append(f"{name}：{n_tasks} 次检索全部返回 0 条，该渠道可能失效或被限流")
     progress(f"共获得 {len(raw)} 条原始结果" + (f"，{len(errors)} 次检索失败" if errors else ""))
 
     # 去重 + 硬筛选：时长（太长的多为合集/长视频，太短的多为片段）、排除词、必含词

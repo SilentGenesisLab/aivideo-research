@@ -20,7 +20,7 @@ import requests
 from . import config
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
+      "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
 
 
 def _proxies(platform: str) -> dict | None:
@@ -677,15 +677,29 @@ def _bing_videos(host: str, query: str, limit: int, only: str | None = None) -> 
     return out
 
 
+_GENERIC_TERMS = re.compile(r"广告片|广告|宣传片|短片|视频|测评|开箱|tvc|抖音|douyin")
+
+
+def _title_matches(title: str, query: str) -> bool:
+    """标题是否和检索词相关。
+    先看空格分出的词是否出现在标题里；中文关键词常常不带空格（“元气森林气泡水广告”整个当一个词，
+    永远不会出现在标题里），所以再去掉“广告/视频”这类泛词，拆成 2 字组，命中 2 个以上就算相关。"""
+    t, q = title.lower(), query.lower()
+    if any(w in t for w in q.split() if len(w) >= 2):
+        return True
+    core = re.sub(r"\s+", "", _GENERIC_TERMS.sub("", q))
+    grams = {core[i:i + 2] for i in range(len(core) - 1)}
+    return bool(grams) and sum(g in t for g in grams) >= min(2, len(grams))
+
+
 def _bing_site(query: str, limit: int, only: str, suffixes: tuple[str, ...],
                host: str = "cn.bing.com") -> list[dict]:
     """借必应视频检索某个站点：依次尝试几种后缀写法，只保留标题含关键词的结果。
     必应对个别写法会“跑偏”（返回无关视频），所以要做相关性过滤并换写法补足。"""
-    tokens = [t.lower() for t in query.split() if len(t) >= 2]
     out, seen = [], set()
     for suffix in suffixes:
         for v in _bing_videos(host, f"{query} {suffix}", limit * 3, only=only):
-            if v["url"] not in seen and any(t in v["title"].lower() for t in tokens):
+            if v["url"] not in seen and _title_matches(v["title"], query):
                 seen.add(v["url"])
                 out.append(v)
         if len(out) >= min(3, limit):

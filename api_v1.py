@@ -812,21 +812,48 @@ class PageReadResponse(BaseModel):
 
 class PageSearchRequest(BaseModel):
     query: str = Field(..., description="检索词")
-    n: int = Field(10, ge=1, le=20, description="返回条数")
-    raw: bool = Field(True, description="是否返回每条网页的正文")
+    n: int = Field(10, ge=1, le=20, description="返回条数（不传 sites 时生效）")
+    raw: bool | None = Field(None, description="是否返回每条网页的正文。不传：全网检索默认 true，指定 sites 时默认 false（几十个站一起搜时带全文会很慢）")
+    sites: list[str] | None = Field(None, max_length=30, description=(
+        "全域搜索：要搜的站点，可填站点 key（见 GET /pages/sites）、中文名或域名，`\"all\"` 表示登记的全部站点。"
+        "每个站各做一次定向检索，结果带 site 字段。不传则是不限站点的全网检索"))
+    per_site: int = Field(5, ge=1, le=10, description="指定 sites 时每个站取几条")
 
 
 class PageSearchItem(BaseModel):
     title: str = ""
     url: str = ""
     content: str = Field("", description="摘要")
-    raw_content: str | None = Field(None, description="正文，raw=true 时有值")
+    raw_content: str | None = Field(None, description="正文，raw=true 时有值；抓到登录/风控页时为 null")
+    site: str | None = Field(None, description="来自哪个站点（指定 sites 时有值）")
+    site_name: str | None = None
+
+
+class PageSiteResult(BaseModel):
+    site: str
+    name: str
+    count: int = Field(..., description="该站返回几条")
+    ok: bool = Field(..., description="该站检索是否成功；false 时看 error")
+    ms: int
+    error: str | None = None
 
 
 class PageSearchResponse(BaseModel):
     query: str
     count: int
     results: list[PageSearchItem]
+    by_site: list[PageSiteResult] | None = Field(None, description="指定 sites 时逐站的结果统计")
+
+
+class PageSite(BaseModel):
+    key: str
+    name: str
+    group: str
+    domains: list[str]
+    search: str = Field("ok", description="站内定向搜索：ok")
+    read: str = Field(..., description="读正文：ok 能读 / partial 部分页面能读 / no 读不到")
+    via: str | None = Field(None, description="读正文走的通道：http / tavily / chrome / api")
+    note: str | None = None
 
 
 class PageCapability(BaseModel):
@@ -873,19 +900,29 @@ def page_read(url: str = Query(..., description="目标网页地址"),
     return r
 
 
+@router.get("/pages/sites", response_model=list[PageSite], tags=["网页内容"],
+            summary="全域搜索支持的站点（key、域名、读正文能力）")
+def page_sites():
+    return [{**s, "search": "ok"} for s in webgrab.SITES]
+
+
 @router.post("/pages/search", response_model=PageSearchResponse, tags=["网页内容"],
-             summary="全网网页检索（Tavily，可带全文）")
+             summary="全域搜索：全网或指定站点检索网页/帖子/视频页（可带全文）")
 def pages_search(p: PageSearchRequest):
     if not webgrab.enabled():
         raise ApiError(503, "webgrab_disabled", "服务端未配置 WEBGRAB_TOKEN")
+    by_site = None
     try:
-        items = webgrab.search(p.query, p.n, p.raw)
+        if p.sites:
+            items, by_site = webgrab.search_sites(p.query, p.sites, p.per_site, bool(p.raw))
+        else:
+            items = webgrab.search(p.query, p.n, True if p.raw is None else p.raw)
     except webgrab.WebGrabError as e:
-        raise ApiError(502, e.code, e.message)
-    return {"query": p.query, "count": len(items),
+        raise ApiError(400 if e.code == "invalid_sites" else 502, e.code, e.message)
+    return {"query": p.query, "count": len(items), "by_site": by_site,
             "results": [{"title": it.get("title") or "", "url": it.get("url") or "",
-                         "content": it.get("content") or "",
-                         "raw_content": it.get("raw_content")} for it in items]}
+                         "content": it.get("content") or "", "raw_content": it.get("raw_content"),
+                         "site": it.get("site"), "site_name": it.get("site_name")} for it in items]}
 
 
 # ---------------- 子应用：独立的 OpenAPI 文档 ----------------
@@ -893,7 +930,9 @@ api = FastAPI(
     title="参考视频检索 API", version="1.0.0",
     description=("上传产品图 → AI 拆解关键词 → 16 个渠道检索参考广告片 → AI 打分并写出参考点 → 可选下载。\n\n"
                  "鉴权：请求头 `X-API-Key: <key>`。所有耗时操作都是异步任务，返回 `task_id` 后轮询 "
-                 "`GET /tasks/{task_id}` 或通过 `callback_url` 接收回调。完整接入说明见 [接入文档](/developer)。"),
+                 "`GET /tasks/{task_id}` 或通过 `callback_url` 接收回调。\n\n"
+                 "全域搜索：`POST /pages/search` 同步搜索 24 个站点（抖音、小红书、B站、知乎、微博、X、Reddit、YouTube 等）"
+                 "或不限站点全网搜索，`GET /pages/sites` 查看站点清单。完整接入说明见 [接入文档](/developer)。"),
     docs_url="/docs", redoc_url="/redoc", openapi_url="/openapi.json")
 api.include_router(router)
 api.include_router(pub)

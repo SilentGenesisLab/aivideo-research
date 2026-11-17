@@ -20,9 +20,12 @@
 | 参考平台 | 15 个人工补充检索的平台及搜索链接，其中 7 个可通过接口直接取作品 |
 | 可选下载 | 指定视频下载为 mp4（H.264/AAC），返回限时下载链接 |
 | 单条链接解析 | 给一条抖音 / 小红书 / B站 / YouTube / TikTok 链接，直接返回元数据 + 可播放地址（见 5.12） |
-| 网页正文 | 给任意网页地址，返回正文纯文本；或按关键词全网检索并带回全文（见 5.14） |
+| 全域搜索 | 一次搜 24 个站（抖音、小红书、B站、知乎、微博、X、Reddit、YouTube、TikTok、GitHub 等）的网页、帖子、视频页，或不限站点全网搜；结果标明来自哪个站（见 5.14） |
+| 网页正文 | 给任意网页地址，返回正文纯文本（见 5.14） |
 
 一次检索约 **1~3 分钟**，所以检索、下载、中转都是**异步任务**。只有单条链接解析（`POST /resolve`）是同步的，2~10 秒返回。
+
+**两类搜索别混：** 找**参考广告片**用检索任务（`POST /searches`，异步，会做 AI 评分与参考点）；找**任意内容**（帖子、文章、视频页、讨论）用全域搜索（`POST /pages/search`，同步，原样返回搜索结果）。
 
 想先看已有结果？`GET /library?q=品牌名` 会在历次检索积累的视频库里立即检索（不产生新检索），没有或不够时再创建检索任务。
 
@@ -163,6 +166,10 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | GET | `/api/v1/library?q=` | 在已有视频库里检索（立即返回，不产生新检索） |
 | POST | `/api/v1/resolve` | 解析单条作品链接（抖音/小红书/B站/YouTube/TikTok），同步返回 |
 | GET | `/api/v1/resolve/stream?url=&exp=&sig=` | 代理播放解析结果，支持 Range，免 Key 凭签名 |
+| POST | `/api/v1/pages/search` | **全域搜索**：不限站点全网搜，或用 `sites` 指定 24 个站点逐站搜，同步返回（5.14） |
+| GET | `/api/v1/pages/sites` | 全域搜索支持的站点清单与读正文能力 |
+| POST / GET | `/api/v1/pages/read` | 取网页正文（批量最多 20 条 / 单页） |
+| GET | `/api/v1/pages/sources` | 站点能力简表（兼容旧接入） |
 
 ### 5.1 GET /sources
 
@@ -608,11 +615,115 @@ curl -X POST https://videodata.sligenai.cn/api/v1/resolve \
 - 签名错误或过期返回 `403 forbidden`，重新调用 `POST /resolve` 即可。
 - 直连能拿到字节流的平台（抖音、小红书、B站、YouTube）边下边转；TikTok 这类对裸请求返回 403 的，先用服务端缓存一份 720p 再发。
 
-### 5.14 网页内容检索（`/pages`）
+### 5.14 全域搜索与网页内容（`/pages`）
 
-不止视频——**任意网页的正文**也能从这里取。服务端接的是一个统一解析器：按域名自动选路（静态直取 / 无头浏览器 / 前端被拦时改走后端接口），失败逐级降级。
+这一组接口**不限于广告视频**：任意网站的帖子、文章、视频页、讨论都能搜、能读。和检索任务（5.2）不同，它们是**同步**的，不产生 `task_id`，直接返回结果。
 
-和检索视频不同的是，这几个接口是**同步**的：直接返回正文，不产生 task_id。
+| 接口 | 用途 |
+|---|---|
+| `POST /pages/search` | **全域搜索**：不限站点全网搜；或用 `sites` 指定一批站点，逐站检索 |
+| `GET /pages/sites` | 支持的站点清单（key、域名、能不能读正文） |
+| `POST /pages/read` / `GET /pages/read` | 取网页正文 |
+| `GET /pages/sources` | 同 `/pages/sites` 的简版（站点 / 能否读 / 通道），保留兼容 |
+
+#### `POST /pages/search`（全域搜索）
+
+**搜指定站点**（推荐）：每个站各做一次定向检索，并发执行，结果带 `site` 字段，`by_site` 逐站说明成败。
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"query":"AI 视频 广告","sites":["xiaohongshu","douyin","zhihu","reddit"],"per_site":5}'
+```
+
+```json
+{
+  "query": "AI 视频 广告",
+  "count": 20,
+  "results": [
+    {"title": "…", "url": "https://www.xiaohongshu.com/explore/…", "content": "摘要…",
+     "raw_content": null, "site": "xiaohongshu", "site_name": "小红书"}
+  ],
+  "by_site": [
+    {"site": "xiaohongshu", "name": "小红书", "count": 5, "ok": true, "ms": 7700, "error": null},
+    {"site": "reddit", "name": "Reddit", "count": 0, "ok": false, "ms": 16200, "error": "…"}
+  ]
+}
+```
+
+**不限站点**：不传 `sites`，等同全网搜索引擎，返回 `n` 条。
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"query":"AI 视频 广告 创意","n":5,"raw":true}'
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `query` | — | 检索词，中英文都可以 |
+| `sites` | 不传 | 要搜的站点：站点 key（见下表）、中文名（如 `知乎`）、或**直接写域名**（如 `adquan.com`）；`["all"]` 表示下表全部 24 个站。最多 30 项 |
+| `per_site` | 5 | 指定 `sites` 时每个站取几条，1~10 |
+| `n` | 10 | 不传 `sites` 时返回几条，1~20 |
+| `raw` | 见右 | 每条是否带 `raw_content` 全文。不传 `sites` 时默认 `true`；传了 `sites` 默认 `false`——几十个站一起搜时带全文会多占时间和流量 |
+
+响应字段：
+
+| 字段 | 说明 |
+|---|---|
+| `results[].site` / `site_name` | 这条来自哪个站（只在指定 `sites` 时有） |
+| `results[].content` | 搜索摘要 |
+| `results[].raw_content` | 页面全文；`raw=false`、或抓到的是登录/风控提示页时为 `null` |
+| `by_site[]` | 逐站统计：`count` 条数、`ok` 是否成功、`ms` 耗时、`error` 失败原因。**某个站返回 0 条或失败时看这里**，不会让整个请求报错 |
+
+注意：
+
+- 所有站点都失败才返回 `502 search_failed`；`sites` 里有未知站点返回 `400 invalid_sites`。
+- 耗时：实测（2026-11-17，换新关键词避开缓存，经公网域名调用）24 个站并发搜、每站 3 条，约 **10~25 秒**，带全文（`raw=true`）耗时相近；72 条里约四成能拿到正文（视频页、登录墙页拿不到正文）。同步接口，请把请求超时设到 ≥ 60 秒。
+- 搜到链接后，如果需要某条的完整正文，用 `POST /pages/read`；如果是**视频**，要播放或下载，把 `url` 交给 `POST /resolve`（抖音 / 小红书 / B站 / YouTube / TikTok）。
+
+#### `GET /pages/sites`（支持的站点）
+
+返回下表同样的数据，前端可据此渲染站点选择器、提示哪些站读不了正文：
+
+```json
+[{"key":"zhihu","name":"知乎","group":"中文社区","domains":["zhihu.com"],
+  "search":"ok","read":"partial","via":"chrome","note":"专栏文章能读…"}]
+```
+
+#### 站点覆盖（2026-11-17 在线上服务实测）
+
+搜索：下表 24 个站用 `site:` 定向检索**全部能搜到**（每站 10/10 条为站内结果）。读正文：每站取 1~2 条样本，结果会随站点反爬变化。
+
+| 站点 | `sites` 里填 | 搜索 | 读正文 | 说明 |
+|---|---|---|---|---|
+| 掘金 | `juejin` | ✅ | ✅ | 文章页走内容 API，约 0.5s |
+| 知乎 | `zhihu` | ✅ | ⚠️ 部分 | 专栏文章（zhuanlan.zhihu.com）能读，约 40s；问题/回答页被登录墙拦截 |
+| 少数派 | `sspai` | ✅ | ✅ |  |
+| 36氪 | `36kr` | ✅ | ✅ | 约 40~50s；正文后面会带页脚文字 |
+| InfoQ | `infoq` | ✅ | ✅ | xie.infoq.cn 的文章要走浏览器，约 30s |
+| 腾讯云社区 | `tencent_cloud` | ✅ | ✅ |  |
+| CSDN | `csdn` | ✅ | ✅ | 约 40s；偶尔被限流 |
+| 公众号 | `wechat` | ✅ | ✅ | 约 1~2s |
+| 头条 | `toutiao` | ✅ | ✅ | 正文前后带导航文字 |
+| 微博 | `weibo` | ✅ | ✅ | 约 45~50s |
+| 即刻 | `jike` | ✅ | ⚠️ 部分 | m.okjike.com 的单条动态能读；web.okjike.com 是登录页，读不到 |
+| B站 | `bilibili` | ✅ | ✅ | 只有标题、简介和推荐列表，没有字幕；约 20~50s。要视频文件用 POST /resolve |
+| 抖音 | `douyin` | ✅ | ✅ | 只有标题、作者、推荐列表；约 50s。要视频文件用 POST /resolve |
+| 小红书 | `xiaohongshu` | ✅ | ❌ | 笔记页被登录墙拦截，读不到正文；搜索只给标题和摘要。单条视频用 POST /resolve（链接要带 xsec_token） |
+| YouTube | `youtube` | ✅ | ✅ | 返回标题、简介和字幕转录 |
+| TikTok | `tiktok` | ✅ | ✅ | 只有视频描述。要视频文件用 POST /resolve |
+| X | `x` | ✅ | ✅ | 单条推文可读；主页只读到最近几条（未登录视图） |
+| Reddit | `reddit` | ✅ | ⚠️ 部分 | 帖子正文约 1/5 能读到，其余被拦截；搜索可用 |
+| Hacker News | `hn` | ✅ | ✅ |  |
+| Medium | `medium` | ✅ | ✅ |  |
+| Substack | `substack` | ✅ | ✅ |  |
+| LinkedIn | `linkedin` | ✅ | ✅ | Pulse 文章可读；正文后带语言列表 |
+| GitHub | `github` | ✅ | ✅ | 约 55s；正文前带导航文字 |
+| arXiv | `arxiv` | ✅ | ✅ | abs 页给摘要，html/pdf 页给全文 |
+
+读正文的 `via` 通道：`http` 静态页直取（约 1 秒）、`tavily` 境外站与转录（约 1~2 秒）、`chrome` 无头浏览器（20~60 秒）、`api` 前端被拦时改走后端接口（不到 1 秒）。
+`via` 可能写成 `tavily-junk>chrome`，表示第一种方式抓到的是验证页，已自动降级。
 
 #### `POST /pages/read`（批量取正文，最多 20 条）
 
@@ -634,7 +745,9 @@ curl -X POST https://videodata.sligenai.cn/api/v1/pages/read \
 | `urls` | 目标地址，1~20 条 |
 | `refresh` | 可选，`true` 跳过 30 分钟缓存 |
 
-单条失败不影响其他条。并发 4 路取，20 条约 1~3 分钟（取决于有多少条要走浏览器）。
+- 单条失败不影响其他条。并发 4 路取，20 条约 1~3 分钟（取决于有多少条要走浏览器）。
+- **验证页、登录墙不会当成功返回**：人机验证页、`Access Denied`、小红书“当前笔记暂时无法浏览”、抖音“服务器出现问题”等一律判为 `ok=false`，`error` 里写明原因。
+- 返回的 `text` 是页面可见文字，部分站点（36氪、头条、GitHub 等）正文前后会带导航、页脚文字，需要精确正文的话请自行截取。
 
 #### `GET /pages/read`（取单页）
 
@@ -644,43 +757,6 @@ curl "https://videodata.sligenai.cn/api/v1/pages/read?url=https%3A%2F%2Fmedium.c
 ```
 
 返回同上单条结构。
-
-#### `POST /pages/search`（全网检索，可带全文）
-
-```bash
-curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
-  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
-  -d '{"query":"AI 视频 广告 创意","n":5,"raw":true}'
-```
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `query` | — | 检索词 |
-| `n` | 10 | 1~20 条 |
-| `raw` | true | 每条是否带 `raw_content` 全文 |
-
-#### `GET /pages/sources`（能力清单）
-
-返回服务端是否启用、以及每个站点能不能读、走哪条通道，前端可据此提示用户。
-
-#### `via` 通道含义
-
-| 值 | 含义 | 耗时 |
-|---|---|---|
-| `http` | 静态页直取（公众号等） | ~0.7s |
-| `tavily` | 境外站、YouTube 转录 | ~0.7s |
-| `chrome` | 需要 JS 或登录态 | 8~15s |
-| `api` | 前端被 WAF 拦，改走后端接口（掘金文章页、X 单条推文） | 0.1~0.4s |
-
-`via` 可能写成 `tavily-junk>chrome`，表示 Tavily 抓到的是验证页，已自动降级到浏览器。
-
-**验证页不会当成功返回。** 人机验证页、`Access Denied`、登录墙一律判为失败并继续降级；全部失败时该条 `ok=false`，`error` 里是降级链。
-
-#### 覆盖范围（实测）
-
-能读：公众号、少数派、InfoQ、腾讯云社区、36氪、CSDN、小红书、B站、微博、头条、抖音、掘金文章、GitHub、arXiv、Substack、Hacker News、Medium、Reddit、LinkedIn、YouTube（返回字幕转录）、掘金、X 单条推文。
-
-不能读：**知乎**（机房 IP 直接 403，需登录态）、**即刻**（网页是登录二维码页）、**X 主页/时间线**（登录墙）。
 
 ## 6. 在你的页面里播放视频
 

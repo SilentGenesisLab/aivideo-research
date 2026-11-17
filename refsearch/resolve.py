@@ -144,6 +144,30 @@ def _ytdlp_cmd(url: str, platform: str) -> list[str]:
 
 
 # ---------------- yt-dlp 平台 ----------------
+def _clean_err(err: str) -> str:
+    """yt-dlp 的报错带 “ERROR: [站点] id:” 前缀和 “please report this issue…” 的英文尾巴，
+    直接给用户看很难懂，只留中间有用的一句。"""
+    err = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?", "", err)
+    err = re.split(r";?\s*please report this issue", err, maxsplit=1)[0]
+    return err.strip()[:300] or "解析失败"
+
+
+def _no_video_msg(platform: str, url: str) -> str:
+    """“No video formats found” 有几种成因，分开说清楚，别让调用方猜。"""
+    if platform == "xhs":
+        ck = Path(config.XHS_COOKIES_FILE)
+        try:
+            h = requests.get(url, headers={"User-Agent": UA},
+                             cookies=_load_cookies(ck) if ck.exists() else None, timeout=20).text
+            title = (re.search(r"<title>(.*?)</title>", h, re.S) or [None, ""])[1]
+        except requests.RequestException:
+            title = ""
+        if "页面不见了" in title or "无法浏览" in title:
+            return "这条小红书笔记已被删除，或链接已失效；请用 App 里「复制链接」得到的完整链接（带 xsec_token）重试"
+        return "这条小红书笔记里没有视频（可能是图文笔记）"
+    return "这条内容里没有可解析的视频"
+
+
 def _info(url: str, platform: str) -> dict:
     cmd = _ytdlp_cmd(url, platform) + [
         "-J", "--skip-download", "--no-warnings", "--socket-timeout", "20", url]
@@ -154,7 +178,9 @@ def _info(url: str, platform: str) -> dict:
             raise ResolveError("该链接暂不支持解析")
         if "geo-restricted" in err or "geo restriction" in err.lower():
             raise ResolveError("该视频在当前服务器所在地区不可用（地域限制），换一条试试")
-        raise ResolveError(err[:300])
+        if "No video formats found" in err:
+            raise ResolveError(_no_video_msg(platform, url))
+        raise ResolveError(_clean_err(err))
     data = json.loads(p.stdout)
     if data.get("_type") == "playlist":
         entries = data.get("entries") or []
