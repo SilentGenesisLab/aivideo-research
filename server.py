@@ -487,6 +487,10 @@ class SelectiveGZip:
 app.add_middleware(SelectiveGZip)
 downloader.backfill()
 _clean_uploads()
+try:
+    downloader.prune_old_downloads()  # 小盘服务器：按 DOWNLOAD_RETENTION_DAYS 清理过期下载件
+except Exception:
+    pass
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

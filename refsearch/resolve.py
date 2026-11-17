@@ -60,7 +60,7 @@ _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 1800
 
 STREAM_DIR = config.RUNS_DIR / "_resolve"
-STREAM_LIMIT = 1024 ** 3  # 直链拿不到时才落盘，上限 1GB
+STREAM_LIMIT = config.RESOLVE_CACHE_LIMIT_MB * 1024 ** 2  # 直链拿不到时才落盘，默认上限 1GB（RESOLVE_CACHE_LIMIT_MB 可调）
 
 # 同一个作品的合并任务只跑一次（首播预取和播放请求可能同时到达）
 _LOCAL: dict[str, threading.Lock] = {}

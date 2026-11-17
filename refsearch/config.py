@@ -116,6 +116,10 @@ WEBGRAB_WORKERS = int(os.environ.get("WEBGRAB_WORKERS") or 4)
 
 RUNS_DIR = Path(os.environ.get("RUNS_DIR", ROOT / "runs"))
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
+# 磁盘保护（小盘服务器必设）：中转播放缓存 / 解析落盘缓存的上限（MB），下载件保留天数（0 = 不自动清理）
+PLAY_CACHE_LIMIT_MB = int(os.environ.get("PLAY_CACHE_LIMIT_MB") or 3072)
+RESOLVE_CACHE_LIMIT_MB = int(os.environ.get("RESOLVE_CACHE_LIMIT_MB") or 1024)
+DOWNLOAD_RETENTION_DAYS = float(os.environ.get("DOWNLOAD_RETENTION_DAYS") or 0)
 
 
 def ffmpeg_path() -> str | None:

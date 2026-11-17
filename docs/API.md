@@ -137,7 +137,7 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 `product_image_url`、`report_url`、`download.file_url`、`play_url` 都是签名链接：
 
 - 无需 API Key，可直接给浏览器使用；支持 Range（视频可拖动进度）。
-- **默认 7 天后失效**。需要长期保存的文件请下载到你自己的存储；过期后重新调用 `GET /runs/{run_id}` 即可拿到新链接。
+- **默认 7 天后失效**。需要长期保存的文件请**拿到链接后立即下载到你自己的存储**；过期后重新调用 `GET /runs/{run_id}` 即可拿到新链接。服务方可用 `DOWNLOAD_RETENTION_DAYS` 让下载件更早被清理，视频文件可能在链接到期前就不在了。
 - `POST /resolve` 返回的 `stream_url` 是同一套签名，但有效期 **6 小时**（源站直链本身也会过期），过期重新解析即可。
 
 ---
