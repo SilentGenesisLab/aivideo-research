@@ -615,6 +615,29 @@ curl -X POST https://videodata.sligenai.cn/api/v1/resolve \
 - 签名错误或过期返回 `403 forbidden`，重新调用 `POST /resolve` 即可。
 - 直连能拿到字节流的平台（抖音、小红书、B站、YouTube）边下边转；TikTok 这类对裸请求返回 403 的，先用服务端缓存一份 720p 再发。
 
+### 5.13.1 `POST /resolve` 的 `direct` 参数（给 4090 这类边缘端直连下载用）
+
+请求体加 `"direct": true`，响应多一个 `direct` 字段：`video_url`、`audio_url`（DASH 才有）、`headers`、`muxed`。
+边缘端拿到后**直接去 CDN 下载**，视频字节不经过本服务。直链短时有效；YouTube / TikTok 的直链绑定解析时的出口 IP，换机器用不了，这两个平台不返回（`direct` 为 `null`）。不传 `direct` 时响应与以前完全一致。
+
+### 5.13.2 边缘回传：`POST|GET /runs/{run_id}/edge-notes`
+
+视频本体放在边缘端（如 4090），本服务只存**结论与指针**（每次检索最多 256KB）：
+
+```bash
+curl -X POST "$BASE/api/v1/runs/$RUN/edge-notes" -H "X-API-Key: $KEY" -H "Content-Type: application/json" -d '{
+  "host": "gpu4090",
+  "items": [{"url": "<检索结果里的视频链接>", "status": "ok", "path": "/data/store/x/video.mp4",
+             "sha256": "…", "size_mb": 3.3,
+             "media": {"duration_s": 15.07, "width": 1280, "height": 720, "fps": 25, "vcodec": "h264", "has_audio": true},
+             "shots": {"count": 5, "avg_len_s": 3.01, "cuts_s": [2.1, 5.4, 9.0, 12.2]},
+             "summary": "15s · 720p · 5 个镜头"}]}'
+```
+
+- 同一个 `url` 再传会覆盖；`status` 取 `ok` / `failed` / `skipped`（`skipped` 常用于海外站，4090 连不上）。
+- `GET /runs/{run_id}` 的结果里带 `edge_notes` 数组；也可以 `GET /runs/{run_id}/edge-notes` 单独读。
+- 配套的取片脚本：`tools/edge_fetch.py`（4090 上跑：下载、ffprobe、镜头切点、关键帧拼图，再回传结论）。
+
 ### 5.14 全域搜索与网页内容（`/pages`）
 
 这一组接口**不限于广告视频**：任意网站的帖子、文章、视频页、讨论都能搜、能读。和检索任务（5.2）不同，它们是**同步**的，不产生 `task_id`，直接返回结果。
@@ -913,6 +936,8 @@ def callback():
 | `META_AD_LIBRARY_TOKEN` | 否 | Meta 广告资料库 access token（需完成身份验证的开发者账号）。不配置时改渲染公开广告库页面，仍能取到在投视频 |
 | `META_AD_LIBRARY_VERSION` | 否 | Graph API 版本，默认 `v23.0` |
 | `META_AD_LIBRARY_COUNTRIES` | 否 | 投放国家代码，逗号分隔，默认 `US,GB,DE,FR,JP` |
+| `VIDEO_STORAGE` | 否 | `local`（默认）：本机下载并存盘。`edge`：本机不存视频本体——`/downloads` 与检索的 `download` 选项不去源站拉字节（返回里 `download.error` 说明由边缘端下载），中转/解析缓存放内存盘；视频由 4090 等边缘端用 `tools/edge_fetch.py` 直连下载，结论经 `edge-notes` 回传。`edge` 模式下服务端的"视频局部分析"需要本机有视频文件，不可用 |
+| `EPHEMERAL_DIR` | 否 | `edge` 模式的内存盘缓存目录，默认 `/dev/shm/videodata`（重启即清，不占磁盘；容量受 `PLAY_CACHE_LIMIT_MB` / `RESOLVE_CACHE_LIMIT_MB` 约束，内存小的机器请设到 60 左右） |
 | `PROXY_URL` | 否 | 出口代理（`socks5h://` 让 DNS 也在代理侧解析）。只有 youtube/tiktok/bilibili/gads/meta 走代理 |
 | `PROXY_URLS` | 否 | 多个出口，逗号分隔，按顺序探测自动切换 |
 | `DOWNLOAD_PROXY_URL` / `DOWNLOAD_PROXY_URLS` | 否 | 下载专用出口；不配置时与搜索共用 |

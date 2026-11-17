@@ -16,7 +16,8 @@
   EDGE_HOST        回传笔记时的机器名，默认 gpu4090
 
 路由：
-  抖音 / 小红书  -> 向服务器要 CDN 直链（POST /resolve direct=true，只传几 KB），4090 直连 CDN 下载
+  抖音 / 小红书  -> 向服务器要 CDN 直链（POST /resolve direct=true，只传几 KB），4090 直连 CDN 下载；
+      老版本服务没有 direct 时，改用它的代理播放地址 stream_url
   B站 / 优酷 / 腾讯 / 爱奇艺 / 芒果等国内站 -> 4090 自己跑 yt-dlp 直连源站
   YouTube / TikTok / Meta / iSpot 等海外站 -> 4090 连不上，不下载；记为 skipped，
       YouTube 链接可让 Gemini 直接读（不用下载）
@@ -104,10 +105,13 @@ def download_direct(url: str, d: Path) -> Path:
     """抖音 / 小红书：向服务器要直链（几 KB），然后 4090 直连 CDN。"""
     r = call("POST", "/resolve", {"url": url, "direct": True}, timeout=120)
     dr = r.get("direct")
-    if not dr:
-        raise RuntimeError("服务器没有给出直链")
     out = d / "video.mp4"
-    if dr.get("muxed", True) or not dr.get("audio_url"):
+    if not dr:
+        # 老版本服务没有 direct：改走它的代理播放地址（服务器在国内时是国内流量；音视频齐全的平台是直通转发，不落盘）
+        if not r.get("stream_url"):
+            raise RuntimeError("服务器既没给直链也没给播放地址")
+        fetch_to(r["stream_url"], out, {})
+    elif dr.get("muxed", True) or not dr.get("audio_url"):
         fetch_to(dr["video_url"], out, dr.get("headers") or {})
     else:
         v, a = d / "v.part", d / "a.part"
@@ -244,9 +248,18 @@ def main() -> int:
         run_id, post = a.run_id, not a.no_post
     print(f"取 {len(urls)} 条 -> {STORE}")
     notes = [process(x, run_id, a.max_height) for x in urls]
+    if run_id:  # 4090 上永远留一份完整清单
+        mf = STORE / run_id / "manifest.json"
+        old = {n["url"]: n for n in json.loads(mf.read_text(encoding="utf-8"))} if mf.exists() else {}
+        old.update({n["url"]: n for n in notes})
+        mf.write_text(json.dumps(list(old.values()), ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"本地清单：{mf}")
     if post:
-        out = call("POST", f"/runs/{run_id}/edge-notes", {"host": HOST, "items": notes})
-        print(f"已回传笔记 {len(notes)} 条（服务器累计 {out['count']} 条，只含结论与路径，不含视频）")
+        try:
+            out = call("POST", f"/runs/{run_id}/edge-notes", {"host": HOST, "items": notes})
+            print(f"已回传笔记 {len(notes)} 条（服务器累计 {out['count']} 条，只含结论与路径，不含视频）")
+        except RuntimeError as e:  # 服务端还没升级到有 edge-notes 的版本：不影响本地结果
+            print(f"回传跳过（服务端暂无 edge-notes 接口，结论只在 4090 本地清单里）：{str(e)[:120]}", file=sys.stderr)
     ok = sum(n["status"] == "ok" for n in notes)
     print(f"完成：成功 {ok} / 跳过 {sum(n['status'] == 'skipped' for n in notes)} / "
           f"失败 {sum(n['status'] == 'failed' for n in notes)}")

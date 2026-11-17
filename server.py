@@ -450,7 +450,8 @@ def job(jid: str):
 def signed_file(path: str, exp: int = 0, sig: str = ""):
     """对外接口给出的限时签名链接（产品图、下载的视频、报告、中转缓存）。"""
     f = (config.RUNS_DIR / path).resolve()
-    if (not security.verify_file(path, exp, sig) or not f.is_relative_to(config.RUNS_DIR.resolve())
+    roots = [config.RUNS_DIR.resolve()] + ([config.EPHEMERAL_DIR.resolve()] if config.EDGE_MODE else [])  # edge：缓存在内存盘
+    if (not security.verify_file(path, exp, sig) or not any(f.is_relative_to(r) for r in roots)
             or f.name.startswith(".") or not f.is_file()):
         raise HTTPException(403, "链接无效或已过期")
     return FileResponse(f)
