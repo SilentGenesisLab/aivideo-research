@@ -5,7 +5,7 @@ from urllib.parse import quote, quote_plus
 
 import requests
 
-from . import searchers
+from . import config, searchers
 from .searchers import SOURCES, UA
 
 
@@ -55,6 +55,9 @@ PLATFORMS = [
      "learn": "导演与制作公司作品集，看高质量品牌片的影像质感",
      "url": lambda q: f"https://vimeo.com/search?q={quote_plus(q)}"},
     # ---- 投放效果：找"有效"的标准 ----
+    {"name": "Google 广告透明度中心", "fetch": searchers.search_gads, "kind": "performance", "lang": "en",
+     "learn": "某个广告主正在投的视频创意，看素材版本和投放时间",
+     "url": lambda q: ("https://adstransparency.google.com/?region=Anywhere&domain=" + quote(q))},
     {"name": "Meta 广告资料库", "kind": "performance", "lang": "en",
      "learn": "竞品正在投放的 FB/IG 广告，看在投素材和版本数量",
      "url": lambda q: ("https://www.facebook.com/ads/library/?active_status=all&ad_type=all"
@@ -86,6 +89,9 @@ PLATFORMS = [
 
 KIND_NAMES = {"creative": "优秀创意（找“好”的标准）", "performance": "投放效果（找“有效”的标准）",
               "social": "用户真实反应", "visual": "视觉与镜头参考"}
+
+# 没有 access token 时 search_meta_ads 会渲染公开广告库页面取视频，两种模式都可直接抓
+next(p for p in PLATFORMS if p["name"] == "Meta 广告资料库")["fetch"] = searchers.search_meta_ads
 
 
 def platform_links(analysis: dict) -> list[dict]:

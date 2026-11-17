@@ -9,26 +9,35 @@
 import base64
 import binascii
 import json
+import os
+import re
 import threading
 import time
 import uuid
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from pathlib import Path
 from typing import Literal
 
 import requests
-from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from refsearch import config, filters as flt, pipeline, platforms, player, security, tasks
+from refsearch import (config, filters as flt, pipeline, platforms, player, resolve, security, stats,
+                       tasks, webgrab)
 from refsearch.searchers import SOURCES
+from refsearch import video_generation, video_work
+from refsearch.video_motion import transitions
+from refsearch.video_motion.provider import Provider as MotionProvider
+from refsearch.video_motion.store import read_json as read_video_json
 
 UPLOADS = config.RUNS_DIR / "_uploads"
 STATUS = {"queued": "queued", "running": "running", "done": "succeeded", "error": "failed"}
+TTL_STREAM = 6 * 3600
 
 
 class ApiError(Exception):
@@ -74,8 +83,12 @@ class Filters(BaseModel):
 
 
 class SearchCreate(BaseModel):
-    image_url: str | None = Field(None, description="产品图公网地址（jpg/png/webp，≤15MB）。与 image_base64 二选一")
+    image_url: str | None = Field(None, description="产品图公网地址（jpg/png/webp，≤15MB）。image_url / image_base64 / query 三选一")
     image_base64: str | None = Field(None, description="产品图 base64，可带 data:image/...;base64, 前缀")
+    query: str | None = Field(None, min_length=1, max_length=100,
+                              description="文字检索：品牌名或产品名（不传产品图时使用），配合 query_type")
+    query_type: Literal["brand", "product"] = Field(
+        "product", description="query 的含义：brand 品牌（检索该品牌全部产品线 + 品牌官方 + 竞品）/ product 产品（本品 + 同品类 + 竞品等）")
     brief: str = Field("", max_length=2000, description="简报：目标、人群、时长、调性、想参考的竞品等，越具体越准")
     sources: list[str] | None = Field(None, description="检索渠道 key 列表，见 GET /sources；不传则全部")
     depth: Literal["quick", "standard", "deep"] = Field(
@@ -116,9 +129,31 @@ class RelayCreate(BaseModel):
     url: str = Field(description="视频页面地址")
 
 
+class ResolveCreate(BaseModel):
+    url: str = Field(description="作品链接：抖音 / 小红书 / B站 / YouTube / TikTok，支持各自短链")
+
+
+class ResolvedVideo(BaseModel):
+    platform: str = Field(description="douyin / xhs / bilibili / youtube / tiktok")
+    platform_name: str
+    video_id: str | None
+    title: str
+    author: str
+    duration: float | None = Field(None, description="秒")
+    cover: str = Field("", description="封面图地址")
+    page_url: str = Field(description="作品页面地址")
+    max_height: int | None = Field(None, description="解析到的清晰度；抖音接口不给")
+    desc: str | None = None
+    like: str | None = Field(None, description="仅小红书")
+    collect: str | None = Field(None, description="仅小红书")
+    comment: str | None = Field(None, description="仅小红书")
+    embed_url: str | None = Field(None, description="可放进 iframe 的官方播放器地址；没有时为 null")
+    stream_url: str = Field(description="服务器代理播放地址，支持 Range，可直接放进 <video src>")
+
+
 class Task(BaseModel):
     task_id: str
-    type: Literal["search", "download", "relay"]
+    type: Literal["search", "download", "relay", "video-analysis"]
     status: Literal["queued", "running", "succeeded", "failed"]
     title: str
     queue_position: int = Field(description="排队中时，前面还有几个同类任务")
@@ -197,8 +232,10 @@ class Run(BaseModel):
     created_at: str
     external_id: str | None
     brief: str
+    query: str | None = Field(None, description="文字检索的检索词；图片检索为 null")
+    query_type: str | None = Field(None, description="brand / product；图片检索为 null")
     sources: list[str]
-    product_image_url: str
+    product_image_url: str | None = Field(description="产品图限时链接；文字检索为 null")
     report_url: str = Field(description="Markdown 报告限时链接")
     product: dict = Field(description="产品画像：brand/name/category/appearance/selling_points/target_audience/tone/competitors")
     dimensions: list[Dimension]
@@ -214,10 +251,12 @@ class RunSummary(BaseModel):
     created_at: str
     external_id: str | None
     brief: str
+    query: str | None = None
+    query_type: str | None = None
     product: str
     category: str
     kept: int
-    product_image_url: str
+    product_image_url: str | None
 
 
 class PlayInfo(BaseModel):
@@ -248,12 +287,18 @@ def task_out(t: dict, base: str) -> dict:
     play = None
     if t["kind"] == "relay" and t.get("result", {}) and t["result"].get("src"):
         play = _abs(base, security.signed_path(t["result"]["src"].removeprefix("/runs/")))
+    result_url = None
+    if t["run_id"] and t["status"] == "done":
+        path = f"/api/v1/runs/{t['run_id']}"
+        if t["kind"] == "video-analysis":
+            path += f"/video-analyses/{t['meta']['analysis_id']}"
+        result_url = _abs(base, path)
     return {
         "task_id": t["id"], "type": t["kind"], "status": STATUS[t["status"]], "title": t["title"],
         "queue_position": tasks.position(t), "progress": t["log"][-1] if t["log"] else "",
         "created_at": t["created"], "started_at": t["started"], "finished_at": t["finished"],
         "error": t["error"], "run_id": t["run_id"],
-        "result_url": _abs(base, f"/api/v1/runs/{t['run_id']}") if t["run_id"] and t["status"] == "done" else None,
+        "result_url": result_url,
         "play_url": play, "external_id": t["meta"].get("external_id"),
         "retry_of": t["meta"].get("retry_of"), "retried_by": t.get("retried_by"),
         "can_retry": t["status"] == "error" and not t.get("retried_by") and bool(t.get("retry")),
@@ -280,8 +325,9 @@ def run_out(r: dict, base: str) -> dict:
 
     return {
         "run_id": rid, "created_at": r.get("created", ""), "external_id": r.get("external_id"),
-        "brief": r.get("brief", ""), "sources": r.get("sources", []),
-        "product_image_url": _file(base, rid, r.get("image", "product.jpg")),
+        "brief": r.get("brief", ""), "query": r.get("query"), "query_type": r.get("query_type"),
+        "sources": r.get("sources", []),
+        "product_image_url": _file(base, rid, r.get("image", "product.jpg")) if r.get("image", "product.jpg") else None,
         "report_url": _file(base, rid, "report.md"),
         "product": r["analysis"].get("product", {}),
         "dimensions": [{**{k: g.get(k) for k in ("key", "name", "what_to_learn")},
@@ -358,9 +404,10 @@ def _sources(keys: list[str] | None) -> tuple:
     return tuple(keys)
 
 
-def _launch(image: Path, p: SearchCreate | RerunCreate, brief: str, pfs: tuple, who: str, base: str,
-            title: str, cleanup: bool, opts: dict | None = None) -> dict:
-    tid = _search_job({"image": str(image), "brief": brief, "platforms": list(pfs), "who": who,
+def _launch(image: Path | None, p: SearchCreate | RerunCreate, brief: str, pfs: tuple, who: str, base: str,
+            title: str, cleanup: bool, opts: dict | None = None, query: tuple[str, str] | None = None) -> dict:
+    """image 与 query（(检索词, brand/product)）二选一。"""
+    tid = _search_job({"image": str(image) if image else None, "query": query, "brief": brief, "platforms": list(pfs), "who": who,
                        "external_id": p.external_id, "callback_url": p.callback_url, "base": base,
                        "title": title, "cleanup": cleanup, "opts": opts or {}})
     return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
@@ -368,14 +415,15 @@ def _launch(image: Path, p: SearchCreate | RerunCreate, brief: str, pfs: tuple, 
 
 def _search_job(spec: dict) -> str:
     """提交与失败重试共用。上传的临时图只在成功后删除，失败时留着供重试。"""
-    image, who, ext_id = Path(spec["image"]), spec["who"], spec["external_id"]
-    if not image.exists():
+    image, who, ext_id = Path(spec["image"]) if spec.get("image") else None, spec["who"], spec["external_id"]
+    query, qtype = (spec.get("query") or (None, None))
+    if image and not image.exists():
         raise tasks.RetryError(410, "原图已被清理，请重新创建检索")
 
     def work(progress):
-        res = pipeline.run_search(str(image), spec["brief"], tuple(spec["platforms"]), progress=progress,
-                                  extra={"client": who, "external_id": ext_id}, **spec["opts"])
-        if spec.get("cleanup"):
+        res = pipeline.run_search(str(image) if image else None, spec["brief"], tuple(spec["platforms"]), progress=progress,
+                                  extra={"client": who, "external_id": ext_id}, query=query, query_type=qtype, **spec["opts"])
+        if image and spec.get("cleanup"):
             image.unlink(missing_ok=True)
         res["client"], res["external_id"] = who, ext_id
         pipeline.save(res)
@@ -438,10 +486,15 @@ def list_sources():
 @router.post("/searches", response_model=TaskCreated, status_code=202, tags=["检索"],
              summary="创建检索任务（JSON，图片用 URL 或 base64）")
 def create_search(p: SearchCreate, request: Request, who: str = Depends(client)):
-    if bool(p.image_url) == bool(p.image_base64):
-        raise ApiError(400, "invalid_image", "image_url 与 image_base64 必须且只能传一个")
+    query = (p.query or "").strip()
+    if sum(map(bool, (p.image_url, p.image_base64, query))) != 1:
+        raise ApiError(400, "invalid_image", "image_url、image_base64、query 必须且只能传一个")
     _check_callback(p.callback_url)
     pfs = _sources(p.sources)
+    if query:  # 文字检索：品牌名 / 产品名，不需要产品图
+        label = "品牌" if p.query_type == "brand" else "产品"
+        return _launch(None, p, p.brief, pfs, who, _base(request), f"{label}：{query}"[:40], False, _opts(p),
+                       query=(query, p.query_type))
     if p.image_url:
         try:
             data, ext = security.fetch_image(p.image_url)
@@ -567,9 +620,11 @@ def list_runs(request: Request, limit: int = Query(20, ge=1, le=200), who: str =
         p = r.get("analysis", {}).get("product", {})
         out.append({"run_id": r["run_id"], "created_at": r.get("created", ""),
                     "external_id": r.get("external_id"), "brief": r.get("brief", ""),
+                    "query": r.get("query"), "query_type": r.get("query_type"),
                     "product": p.get("name", ""), "category": p.get("category", ""),
                     "kept": sum(len(g["videos"]) for g in r.get("groups", [])),
-                    "product_image_url": _file(base, r["run_id"], r.get("image", "product.jpg"))})
+                    "product_image_url": _file(base, r["run_id"], r.get("image", "product.jpg"))
+                    if r.get("image", "product.jpg") else None})
         if len(out) >= limit:
             break
     return out
@@ -581,7 +636,8 @@ def rerun(run_id: str, p: RerunCreate, request: Request, who: str = Depends(clie
     old = _own_run(run_id, who)
     _check_callback(p.callback_url)
     brief = old.get("brief", "") if p.brief is None else p.brief
-    image = pipeline.run_image(run_id)
+    text = pipeline.run_query(run_id)
+    image = None if text else pipeline.run_image(run_id)
     if p.external_id is None:
         p.external_id = old.get("external_id")
     title = "重新检索：" + (old["analysis"].get("product", {}).get("name") or run_id)[:30]
@@ -590,7 +646,7 @@ def rerun(run_id: str, p: RerunCreate, request: Request, who: str = Depends(clie
     target = o.get("target_count") if p.target_count is None else (p.target_count or None)
     opts = {"filters": f, "depth": p.depth or o.get("depth") or "standard", "target_count": target,
             "min_score": o.get("min_score", 5), "max_duration": o.get("max_duration", 300)}
-    return _launch(image, p, brief, _sources(p.sources), who, _base(request), title, False, opts)
+    return _launch(image, p, brief, _sources(p.sources), who, _base(request), title, False, opts, query=text)
 
 
 @router.post("/runs/{run_id}/downloads", response_model=TaskCreated, status_code=202, tags=["下载"],
@@ -612,6 +668,47 @@ def create_download(run_id: str, p: DownloadCreate, request: Request, who: str =
                          "who": who, "external_id": r.get("external_id"), "callback_url": p.callback_url,
                          "base": base})
     return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
+
+
+class LibraryVideo(BaseModel):
+    platform: str
+    url: str
+    title: str
+    channel: str | None
+    duration: int | None
+    views: int | None
+    thumbnail: str | None
+    score: float
+    is_ad: bool | None
+    video_type: str | None
+    video_type_name: str | None
+    reference: str | None
+    embed_url: str | None
+    dimension: str = Field(description="当初被检索到时所属的参考维度名称，如“同品类”“竞品”")
+    brand: str | None = Field(description="当初检索的品牌")
+    category: str | None = Field(description="当初检索的品类")
+    found_at: str = Field(description="首次被检索到的时间")
+
+
+class LibraryResult(BaseModel):
+    total: int
+    items: list[LibraryVideo]
+
+
+@router.get("/library", response_model=LibraryResult, tags=["结果"],
+            summary="在已有视频库里检索（历次检索找到的全部参考视频，立即返回，不产生新检索）")
+def library(q: str = Query(min_length=1, max_length=100, description="关键词，如品牌名或产品名；空格分隔多个词时须全部命中"),
+            min_score: float = Query(5, ge=0, le=10), limit: int = Query(60, ge=1, le=200),
+            types: str = Query("", description="视频类型 key，逗号分隔，见 GET /video-types")):
+    """匹配标题、参考点、频道，以及当初检索的品牌 / 产品 / 品类。同一视频只返回一条（分数最高的）。
+    视频库是各调用方共享的公开视频索引；不返回别的调用方的检索 ID 和简报。"""
+    r = stats.search_videos(q=q, min_score=min_score, dedupe=True, sort="score", limit=limit, vtype=types)
+    return {"total": r["total"], "items": [{
+        **{k: v.get(k) for k in ("platform", "url", "title", "channel", "duration", "views", "thumbnail",
+                                  "is_ad", "reference", "brand", "category")},
+        "score": v.get("score") or 0, "video_type": v.get("vtype"), "video_type_name": v.get("vtype_name"),
+        "embed_url": player.embed_url(v["url"]), "dimension": v.get("dim_name") or "", "found_at": v.get("created") or "",
+    } for v in r["items"]]}
 
 
 @router.get("/play", response_model=PlayInfo, tags=["播放"], summary="解析视频的站内播放方式")
@@ -637,6 +734,60 @@ def relay(p: RelayCreate, request: Request, who: str = Depends(client)):
     return {"task_id": tid, "status": "queued", "status_url": _abs(_base(request), f"/api/v1/tasks/{tid}")}
 
 
+@router.post("/resolve", response_model=ResolvedVideo, tags=["解析"],
+             summary="把一条作品链接解析成元数据 + 可播放地址（同步返回，抖音约 10 秒）")
+def resolve_link(p: ResolveCreate, request: Request):
+    """支持抖音、小红书、B站、YouTube、TikTok 及各自短链。视频号没有公开网页，不支持。
+    大陆机房访问 B站网页会被 412 风控，和 YouTube/TikTok 一样走 PROXY_URL 出口。"""
+    try:
+        info = resolve.resolve_cached(p.url)
+    except resolve.ResolveError as e:
+        raise ApiError(400, "resolve_failed", str(e))
+    base = _base(request)
+    # 拿不到音视频齐全直链的平台要 yt-dlp 合并，首播会等一两分钟；
+    # 解析一返回就在后台先拉好，人点播放时通常已就绪
+    threading.Thread(target=resolve.prewarm, args=(info,), daemon=True).start()
+    return {
+        **{k: info.get(k) for k in ("platform", "platform_name", "video_id", "title", "author", "duration",
+                                    "cover", "page_url", "max_height", "desc", "like", "collect", "comment")},
+        "embed_url": player.embed_url(info["page_url"]),
+        "stream_url": _abs(base, "/api/v1/resolve/stream?url=" + quote(info["page_url"], safe="")
+                           + "&" + security.sign_value(info["page_url"], TTL_STREAM)),
+    }
+
+
+# 播放链接要能直接放进 <video src>（浏览器不带请求头），所以不走 API Key，改签名校验
+pub = APIRouter()
+
+
+@pub.get("/resolve/stream", tags=["解析"], summary="代理播放：把解析到的视频以字节流转发（支持 Range）")
+def resolve_stream(url: str = Query(description="作品链接，或 POST /resolve 返回的 page_url"),
+                   exp: int = Query(description="签名过期时间（POST /resolve 返回的 stream_url 里已带）"),
+                   sig: str = Query(description="签名"),
+                   range: str | None = Header(None)):
+    """免登录，凭签名访问。直链能播就直接转发；TikTok 这类会对裸请求返回 403 的，
+    先用 yt-dlp 落一份 720p 缓存再发。"""
+    if not security.verify_value(url, exp, sig):
+        raise ApiError(403, "forbidden", "播放链接无效或已过期，重新调用 POST /resolve")
+    try:
+        info = resolve.resolve_cached(url)
+    except resolve.ResolveError as e:
+        raise ApiError(400, "resolve_failed", str(e))
+    up = resolve.open_upstream(info, range) if info.get("muxed", True) else None
+    if up is None:
+        try:
+            path = resolve.cache_local(info)
+        except resolve.ResolveError as e:
+            raise ApiError(502, "stream_failed", str(e))
+        return FileResponse(path, media_type="video/mp4")
+    headers = {k: up.headers[k] for k in ("Content-Length", "Content-Range", "Accept-Ranges", "Content-Type")
+               if k in up.headers}
+    headers["X-Accel-Buffering"] = "no"
+    return StreamingResponse(up.iter_content(1 << 18), status_code=up.status_code, headers=headers,
+                             media_type=up.headers.get("Content-Type", "video/mp4"),
+                             background=BackgroundTask(up.close))
+
+
 @router.get("/reference-platforms/items", response_model=list[PlatformItem], tags=["参考平台"],
             summary="直接抓取某个参考平台的作品（direct=true 的平台）")
 def platform_items(name: str = Query(description="reference_platforms[].name"),
@@ -651,14 +802,309 @@ def platform_items(name: str = Query(description="reference_platforms[].name"),
              "media": it.get("media", "video")} for it in items]
 
 
+# ---------------- 视频局部分析与生成 ----------------
+class VideoAnalysisCreate(BaseModel):
+    url: str = Field(min_length=1, max_length=4096, description="本次检索中已下载的视频原始链接")
+    max_windows: int = Field(12, ge=1, le=12, description="局部分析窗口预算")
+
+
+class TransitionCreate(BaseModel):
+    window_id: str = Field(pattern=r"^w[0-9]{3}$")
+
+
+class VideoGenerationCreate(BaseModel):
+    event_ids: list[str] = Field(min_length=1, max_length=12)
+    route: Literal["h3", "fast", "normal"] = "h3"
+    queue_reference: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    take: str = Field("", max_length=64, description="同一方案需要另一个样本时指定不同的样本编号")
+
+
+def _provider_key(header, env, name):
+    key = header or os.getenv(env) or ""
+    if not key:
+        raise ApiError(503, "provider_not_configured", f"缺少 {name} 供应商凭据")
+    return key
+
+
+def _video_result(run_id, analysis_id):
+    try:
+        folder = video_work.analysis_dir(run_id, analysis_id)
+    except ValueError as exc:
+        raise ApiError(404, "not_found", str(exc)) from None
+    result = read_video_json(folder / "temporal/result.json")
+    if result is None:
+        raise ApiError(404, "not_found", "分析结果尚未生成，请查看任务状态")
+    return folder, result
+
+
+@router.post("/runs/{run_id}/video-analyses", response_model=TaskCreated, status_code=202,
+             tags=["视频分析"], summary="分析本次检索中已下载的视频")
+def create_video_analysis(run_id: str, p: VideoAnalysisCreate, request: Request, who: str = Depends(client),
+                          ark_key: str | None = Header(None, alias="X-Ark-API-Key")):
+    run = _own_run(run_id, who)
+    try:
+        source = video_work.downloaded_video(run, p.url)
+    except FileNotFoundError as exc:
+        raise ApiError(404, "video_not_downloaded", str(exc)) from None
+    key = _provider_key(ark_key, "ARK_API_KEY", "Ark")
+    identity = uuid.uuid4().hex
+    folder = video_work.analysis_dir(run_id, identity)
+
+    def analyze(progress):
+        result = video_work.analyze_video(source, folder, key, p.max_windows, progress)
+        if not result["windows"]:
+            errors = result["errors"]
+            raise RuntimeError(errors[0]["error"] if errors else "未得到可用的局部分析结果")
+        return {"run_id": run_id}
+
+    tid = tasks.submit("video-analysis", "视频局部分析", analyze,
+                       meta={"client": who, "run_id": run_id, "analysis_id": identity})
+    return {"task_id": tid, "status": "queued",
+            "status_url": _abs(_base(request), f"/api/v1/tasks/{tid}")}
+
+
+@router.get("/runs/{run_id}/video-analyses/{analysis_id}", tags=["视频分析"],
+            summary="读取局部分析与证据帧")
+def get_video_analysis(run_id: str, analysis_id: str, request: Request, who: str = Depends(client)):
+    _own_run(run_id, who)
+    folder, result = _video_result(run_id, analysis_id)
+    base = _base(request)
+
+    def media_url(path):
+        rel = Path(path).resolve().relative_to(folder.resolve()).as_posix()
+        return _file(base, run_id, f"video-analyses/{analysis_id}/{rel}")
+
+    def frame_out(frame):
+        return {**{k: v for k, v in frame.items() if k != "file"}, "url": media_url(frame["file"])}
+
+    windows = []
+    for window in result["windows"]:
+        evidence = read_video_json(window["evidence_manifest"])
+        frames = {frame["id"]: frame for frame in evidence["frames"]}
+        windows.append({
+            "window": window["window"],
+            "events": [{**event, "evidence": [frame_out(frame) for frame in event["evidence"]]}
+                       for event in window["events"]],
+            "change_pairs": [{"before": frame_out(frames[pair["before"]]),
+                              "after": frame_out(frames[pair["after"]]), "source_scan": pair["source_scan"]}
+                             for pair in window["change_pairs"]],
+            "frame_sheets": [media_url(path) for path in evidence["sheets"]],
+            "withheld_count": len(window["withheld"]),
+        })
+    observed = [{**event, "evidence": [frame_out(frame) for frame in event["evidence"]]}
+                for event in transitions.events(folder)]
+    return {"analysis_id": analysis_id, "complete": result["complete"], "parallelism": result["parallelism"],
+            "windows": windows, "transition_events": observed,
+            "errors": result["errors"], "limitations": result["limitations"]}
+
+
+@router.post("/runs/{run_id}/video-analyses/{analysis_id}/transitions", response_model=TaskCreated,
+             status_code=202, tags=["视频分析"], summary="按相邻前后帧逐次提取变化和动作衔接")
+def refine_video_transitions(run_id: str, analysis_id: str, p: TransitionCreate, request: Request,
+                             who: str = Depends(client),
+                             ark_key: str | None = Header(None, alias="X-Ark-API-Key")):
+    _own_run(run_id, who)
+    folder, result = _video_result(run_id, analysis_id)
+    window = next((w for w in result["windows"] if w["window"]["id"] == p.window_id), None)
+    if not window or not window.get("change_pairs"):
+        raise ApiError(404, "no_change_pairs", "此窗口没有已提取的相邻变化帧")
+    key = _provider_key(ark_key, "ARK_API_KEY", "Ark")
+
+    def refine(progress):
+        progress(f"逐对核查变化帧，窗口 {p.window_id}")
+        transitions.refine(folder, p.window_id, MotionProvider(video_work.MotionSettings(key)))
+        return {"run_id": run_id}
+
+    tid = tasks.submit("video-analysis", "逐帧变化提取", refine,
+                       meta={"client": who, "run_id": run_id, "analysis_id": analysis_id})
+    return {"task_id": tid, "status": "queued",
+            "status_url": _abs(_base(request), f"/api/v1/tasks/{tid}")}
+
+
+@router.get("/generation/preflight", tags=["视频生成"], summary="查看生成通道的健康状态与可见队列")
+def video_generation_preflight(route: Literal["h3", "fast", "normal"] = "h3",
+                               queue_reference: str | None = Query(None, pattern=r"^[A-Za-z0-9_-]{1,128}$"),
+                               centre_key: str | None = Header(None, alias="X-AICentre-API-Key")):
+    key = _provider_key(centre_key, "AICENTRE_API_KEY", "AI Centre")
+    return video_generation.preflight(key, route, queue_reference=queue_reference)
+
+
+@router.post("/runs/{run_id}/video-analyses/{analysis_id}/generations", tags=["视频生成"],
+             summary="从通过校验的事件提交纯文字生成，发送前查询队列")
+def create_video_generation(run_id: str, analysis_id: str, p: VideoGenerationCreate, who: str = Depends(client),
+                            centre_key: str | None = Header(None, alias="X-AICentre-API-Key")):
+    _own_run(run_id, who)
+    folder, result = _video_result(run_id, analysis_id)
+    key = _provider_key(centre_key, "AICENTRE_API_KEY", "AI Centre")
+    try:
+        prompt = video_generation.make_prompt({**result, "transition_events": transitions.events(folder)}, p.event_ids)
+    except ValueError as exc:
+        raise ApiError(400, "invalid_generation_events", str(exc)) from None
+    receipt = video_generation.submit(folder / "generations", key, p.route, prompt, p.queue_reference, p.take)
+    return JSONResponse(receipt, status_code=409 if receipt["status"] == "deferred" else 200)
+
+
+@router.get("/runs/{run_id}/video-analyses/{analysis_id}/generations/{generation_id}", tags=["视频生成"],
+            summary="查询已提交的生成任务")
+def get_video_generation(run_id: str, analysis_id: str, generation_id: str, who: str = Depends(client),
+                         centre_key: str | None = Header(None, alias="X-AICentre-API-Key")):
+    _own_run(run_id, who)
+    folder, _ = _video_result(run_id, analysis_id)
+    if not re.fullmatch(r"[0-9a-f]{32}", generation_id):
+        raise ApiError(404, "not_found", "生成记录不存在")
+    key = _provider_key(centre_key, "AICENTRE_API_KEY", "AI Centre")
+    record = video_generation.refresh(folder / "generations", key, generation_id)
+    if not record:
+        raise ApiError(404, "not_found", "生成记录不存在")
+    return record
+
+
+# ---------------- 网页内容检索（WebGrab）----------------
+class PageReadRequest(BaseModel):
+    urls: list[str] = Field(..., min_length=1, max_length=20, description="目标网页地址，最多 20 个")
+    refresh: bool = Field(False, description="true 时跳过 WebGrab 的 30 分钟缓存")
+
+
+class PageResult(BaseModel):
+    url: str
+    ok: bool
+    via: str | None = Field(None, description="实际抓取通道：http / tavily / chrome / api")
+    chars: int | None = Field(None, description="正文字符数")
+    ms: int | None = None
+    text: str | None = Field(None, description="正文纯文本，ok=false 时为空")
+    error: str | None = Field(None, description="ok=false 时的失败原因")
+
+
+class PageReadResponse(BaseModel):
+    results: list[PageResult]
+
+
+class PageSearchRequest(BaseModel):
+    query: str = Field(..., description="检索词")
+    n: int = Field(10, ge=1, le=20, description="返回条数（不传 sites 时生效）")
+    raw: bool | None = Field(None, description="是否返回每条网页的正文。不传：全网检索默认 true，指定 sites 时默认 false（几十个站一起搜时带全文会很慢）")
+    sites: list[str] | None = Field(None, max_length=30, description=(
+        "全域搜索：要搜的站点，可填站点 key（见 GET /pages/sites）、中文名或域名，`\"all\"` 表示登记的全部站点。"
+        "每个站各做一次定向检索，结果带 site 字段。不传则是不限站点的全网检索"))
+    per_site: int = Field(5, ge=1, le=10, description="指定 sites 时每个站取几条")
+
+
+class PageSearchItem(BaseModel):
+    title: str = ""
+    url: str = ""
+    content: str = Field("", description="摘要")
+    raw_content: str | None = Field(None, description="正文，raw=true 时有值；抓到登录/风控页时为 null")
+    site: str | None = Field(None, description="来自哪个站点（指定 sites 时有值）")
+    site_name: str | None = None
+
+
+class PageSiteResult(BaseModel):
+    site: str
+    name: str
+    count: int = Field(..., description="该站返回几条")
+    ok: bool = Field(..., description="该站检索是否成功；false 时看 error")
+    ms: int
+    error: str | None = None
+
+
+class PageSearchResponse(BaseModel):
+    query: str
+    count: int
+    results: list[PageSearchItem]
+    by_site: list[PageSiteResult] | None = Field(None, description="指定 sites 时逐站的结果统计")
+
+
+class PageSite(BaseModel):
+    key: str
+    name: str
+    group: str
+    domains: list[str]
+    search: str = Field("ok", description="站内定向搜索：ok")
+    read: str = Field(..., description="读正文：ok 能读 / partial 部分页面能读 / no 读不到")
+    via: str | None = Field(None, description="读正文走的通道：http / tavily / chrome / api")
+    note: str | None = None
+
+
+class PageCapability(BaseModel):
+    site: str
+    ok: bool
+    via: str | None = None
+    note: str | None = None
+
+
+class PageSources(BaseModel):
+    enabled: bool = Field(..., description="服务端是否配置了 WebGrab")
+    base: str
+    capabilities: list[PageCapability]
+
+
+@router.get("/pages/sources", response_model=PageSources, tags=["网页内容"],
+            summary="网页检索能力：哪些站点能读、走什么通道")
+def page_sources():
+    return {"enabled": webgrab.enabled(), "base": webgrab.BASE,
+            "capabilities": webgrab.CAPABILITIES}
+
+
+@router.post("/pages/read", response_model=PageReadResponse, tags=["网页内容"],
+             summary="取网页正文（批量，最多 20 条，单条失败不影响其他条）")
+def pages_read(p: PageReadRequest):
+    if not webgrab.enabled():
+        raise ApiError(503, "webgrab_disabled", "服务端未配置 WEBGRAB_TOKEN")
+    try:
+        return {"results": webgrab.read_many(p.urls, p.refresh)}
+    except webgrab.WebGrabError as e:
+        raise ApiError(502, e.code, e.message)
+
+
+@router.get("/pages/read", response_model=PageResult, tags=["网页内容"], summary="取单个网页正文")
+def page_read(url: str = Query(..., description="目标网页地址"),
+              refresh: bool = Query(False, description="跳过缓存")):
+    if not webgrab.enabled():
+        raise ApiError(503, "webgrab_disabled", "服务端未配置 WEBGRAB_TOKEN")
+    try:
+        r = webgrab.read(url, refresh)
+    except webgrab.WebGrabError as e:
+        code = 502 if e.code == "page_unavailable" else 400
+        raise ApiError(code, e.code, e.message)
+    return r
+
+
+@router.get("/pages/sites", response_model=list[PageSite], tags=["网页内容"],
+            summary="全域搜索支持的站点（key、域名、读正文能力）")
+def page_sites():
+    return [{**s, "search": "ok"} for s in webgrab.SITES]
+
+
+@router.post("/pages/search", response_model=PageSearchResponse, tags=["网页内容"],
+             summary="全域搜索：全网或指定站点检索网页/帖子/视频页（可带全文）")
+def pages_search(p: PageSearchRequest):
+    if not webgrab.enabled():
+        raise ApiError(503, "webgrab_disabled", "服务端未配置 WEBGRAB_TOKEN")
+    by_site = None
+    try:
+        if p.sites:
+            items, by_site = webgrab.search_sites(p.query, p.sites, p.per_site, bool(p.raw))
+        else:
+            items = webgrab.search(p.query, p.n, True if p.raw is None else p.raw)
+    except webgrab.WebGrabError as e:
+        raise ApiError(400 if e.code == "invalid_sites" else 502, e.code, e.message)
+    return {"query": p.query, "count": len(items), "by_site": by_site,
+            "results": [{"title": it.get("title") or "", "url": it.get("url") or "",
+                         "content": it.get("content") or "", "raw_content": it.get("raw_content"),
+                         "site": it.get("site"), "site_name": it.get("site_name")} for it in items]}
+
+
 # ---------------- 子应用：独立的 OpenAPI 文档 ----------------
 api = FastAPI(
     title="参考视频检索 API", version="1.0.0",
     description=("上传产品图 → AI 拆解关键词 → 16 个渠道检索参考广告片 → AI 打分并写出参考点 → 可选下载。\n\n"
                  "鉴权：请求头 `X-API-Key: <key>`。所有耗时操作都是异步任务，返回 `task_id` 后轮询 "
-                 "`GET /tasks/{task_id}` 或通过 `callback_url` 接收回调。完整接入说明见 [接入文档](/developer)。"),
+                 "`GET /tasks/{task_id}` 或通过 `callback_url` 接收回调。\n\n"
+                 "全域搜索：`POST /pages/search` 同步搜索 24 个站点（抖音、小红书、B站、知乎、微博、X、Reddit、YouTube 等）"
+                 "或不限站点全网搜索，`GET /pages/sites` 查看站点清单。完整接入说明见 [接入文档](/developer)。"),
     docs_url="/docs", redoc_url="/redoc", openapi_url="/openapi.json")
 api.include_router(router)
+api.include_router(pub)
 
 
 def _err(status: int, code: str, message: str) -> JSONResponse:

@@ -68,10 +68,13 @@ def _page_embed(url: str) -> dict | None:
 
 def _direct(url: str) -> str | None:
     """用 yt-dlp 只解析不下载，找一个浏览器能直接播放的单文件（音画一体的 http 直链）。"""
+    cmd = [sys.executable, "-m", "yt_dlp", "-J", "--no-playlist", "--no-warnings",
+           "--socket-timeout", "15"]
+    if p := _host_proxy(url):
+        cmd += ["--proxy", p]
     try:
-        p = subprocess.run([sys.executable, "-m", "yt_dlp", "-J", "--no-playlist", "--no-warnings",
-                            "--socket-timeout", "15", url], capture_output=True, text=True, timeout=40)
-        info = json.loads(p.stdout) if p.returncode == 0 else {}
+        p2 = subprocess.run(cmd + [url], capture_output=True, text=True, timeout=40)
+        info = json.loads(p2.stdout) if p2.returncode == 0 else {}
     except (subprocess.TimeoutExpired, ValueError):
         return None
     ok = [f for f in info.get("formats") or [info]
@@ -82,6 +85,16 @@ def _direct(url: str) -> str | None:
         return None
     small = [f for f in ok if (f.get("height") or 0) <= 720]
     return (max(small, key=lambda f: f.get("height") or 0) if small else ok[0])["url"]
+
+
+def _host_proxy(url: str) -> str:
+    """按域名挑出口：Facebook 的 CDN 只认 8.217 那条直连，YouTube 只认干净 IP。"""
+    host = urlparse(url).netloc.lower()
+    if "fbcdn" in host or "facebook.com" in host:
+        return config.proxy_for("meta")
+    if "googlevideo" in host or "youtube" in host or "ytimg" in host:
+        return config.proxy_for("youtube")
+    return ""
 
 
 def resolve(url: str) -> dict:

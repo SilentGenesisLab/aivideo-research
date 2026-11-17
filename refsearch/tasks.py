@@ -19,6 +19,7 @@ _POOLS = {
     "search": ThreadPoolExecutor(int(os.environ.get("SEARCH_WORKERS", "2")), thread_name_prefix="search"),
     # 下载会改写同一份 result.json，串行执行避免互相覆盖
     "download": ThreadPoolExecutor(1, thread_name_prefix="download"),
+    "video-analysis": ThreadPoolExecutor(1, thread_name_prefix="video-analysis"),
     "relay": ThreadPoolExecutor(3, thread_name_prefix="relay"),
 }
 _tasks: dict[str, dict] = {}

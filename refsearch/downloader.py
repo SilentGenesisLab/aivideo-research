@@ -17,6 +17,8 @@ from .searchers import canonical
 
 TIMEOUT = 180  # 单条视频最长下载时间（秒）
 _TRANSIENT = ("No video formats found", "KeyError", "HTTP Error 412", "HTTP Error 429")
+_PLATFORM_PROXY_KEY = {"YouTube": "youtube", "TikTok": "tiktok", "Bilibili": "bilibili",
+                       "Google广告透明度": "youtube", "Meta 广告库": "meta"}
 
 
 # ---------------- 下载缓存：同一视频同一清晰度只下载一次 ----------------
@@ -120,11 +122,14 @@ def download(videos: list[dict], out_dir: Path, max_height: int = 720,
         ]
         if config.ffmpeg_path():
             cmd += ["--ffmpeg-location", config.ffmpeg_path()]
+        # 平台名 → 出口配置里的平台键：Google 透明度返回的是 YouTube 链接，所以走 youtube 出口
+        if (key := _PLATFORM_PROXY_KEY.get(v.get("platform"))) and (proxy := config.proxy_for(key, download=True)):
+            cmd += ["--proxy", proxy]
         if v.get("platform") == "Bilibili":
             cmd += ["--add-header", "Referer:https://www.bilibili.com/"]
         if v.get("platform") == "抖音":
-            if not config.DOUYIN_COOKIES_FILE:
-                results.append(_fail(v, "抖音下载需要 cookies：在 .env 配置 DOUYIN_COOKIES_FILE"))
+            if not Path(config.DOUYIN_COOKIES_FILE).exists():
+                results.append(_fail(v, f"抖音下载需要 cookies：{config.DOUYIN_COOKIES_FILE}"))
                 continue
             cmd += ["--cookies", config.DOUYIN_COOKIES_FILE]
         cmd.append(v["url"])

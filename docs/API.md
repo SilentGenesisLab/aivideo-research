@@ -10,17 +10,24 @@
 
 ## 1. 它能做什么
 
-输入一张产品图（可加一段简报），返回：
+输入一张产品图（可加一段简报），**或者直接输入品牌名 / 产品名**（文字检索，见 5.2 的 `query`），返回：
 
 | 内容 | 说明 |
 |---|---|
 | 产品画像 | 品牌、产品名、品类、外观、卖点、目标人群、调性、竞品 |
 | 5 个参考维度 | 同品类 / 竞品 / 情绪主题 / 结构形式 / 获奖标杆，每个维度写明“参考什么”和检索关键词 |
-| 参考视频 | 每个维度最多 10 条，来自 B 站、抖音、优酷、YouTube、数英、iSpot.tv 等 16 个渠道；每条有 AI 评分（0~10）、是否广告正片、**具体参考点**、可内嵌的播放地址 |
+| 参考视频 | 每个维度最多 10 条，来自 B 站、抖音、优酷、YouTube、数英、iSpot.tv 等 18 个渠道（默认检索 16 个，Google 广告透明度中心与 Meta 广告资料库需显式选择）；每条有 AI 评分（0~10）、是否广告正片、**具体参考点**、可内嵌的播放地址 |
 | 参考平台 | 15 个人工补充检索的平台及搜索链接，其中 7 个可通过接口直接取作品 |
 | 可选下载 | 指定视频下载为 mp4（H.264/AAC），返回限时下载链接 |
+| 单条链接解析 | 给一条抖音 / 小红书 / B站 / YouTube / TikTok 链接，直接返回元数据 + 可播放地址（见 5.12） |
+| 全域搜索 | 一次搜 24 个站（抖音、小红书、B站、知乎、微博、X、Reddit、YouTube、TikTok、GitHub 等）的网页、帖子、视频页，或不限站点全网搜；结果标明来自哪个站（见 5.14） |
+| 网页正文 | 给任意网页地址，返回正文纯文本（见 5.14） |
 
-一次检索约 **1~3 分钟**，所以所有耗时操作都是**异步任务**。
+一次检索约 **1~3 分钟**，所以检索、下载、中转都是**异步任务**。只有单条链接解析（`POST /resolve`）是同步的，2~10 秒返回。
+
+**两类搜索别混：** 找**参考广告片**用检索任务（`POST /searches`，异步，会做 AI 评分与参考点）；找**任意内容**（帖子、文章、视频页、讨论）用全域搜索（`POST /pages/search`，同步，原样返回搜索结果）。
+
+想先看已有结果？`GET /library?q=品牌名` 会在历次检索积累的视频库里立即检索（不产生新检索），没有或不够时再创建检索任务。
 
 ---
 
@@ -106,10 +113,13 @@ Authorization: Bearer <key>
 | 400 | `invalid_sources` | `sources` 里有未知渠道 |
 | 400 | `invalid_callback_url` / `invalid_url` | 地址不是 http(s) 或指向内网 |
 | 400 | `invalid_request` | 其他业务参数错误 |
+| 400 | `resolve_failed` | 链接解析失败（平台不支持、作品不存在、地域限制、cookies 失效等，`message` 写明原因） |
 | 401 | `unauthorized` | 缺少或无效的 API Key |
+| 403 | `forbidden` | 播放签名无效或已过期，重新调用 `POST /resolve` 取新的 `stream_url` |
 | 404 | `not_found` | 任务/结果不存在，或不属于你的 Key |
 | 422 | `invalid_request` | 参数类型或取值范围错误（message 会写明字段） |
 | 502 | `upstream_error` | 第三方平台抓取失败 |
+| 502 | `stream_failed` | 播放时无法从源站取到视频（源站限流或作品已删除） |
 | 500 | `internal_error` | 服务内部错误 |
 
 ### 4.3 任务状态
@@ -128,6 +138,7 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 
 - 无需 API Key，可直接给浏览器使用；支持 Range（视频可拖动进度）。
 - **默认 7 天后失效**。需要长期保存的文件请下载到你自己的存储；过期后重新调用 `GET /runs/{run_id}` 即可拿到新链接。
+- `POST /resolve` 返回的 `stream_url` 是同一套签名，但有效期 **6 小时**（源站直链本身也会过期），过期重新解析即可。
 
 ---
 
@@ -152,6 +163,13 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | GET | `/api/v1/play?url=` | 解析视频的播放方式 |
 | POST | `/api/v1/relay` | 服务器中转播放（不能内嵌的站点） |
 | GET | `/api/v1/reference-platforms/items?name=&q=` | 直接取某个参考平台的作品 |
+| GET | `/api/v1/library?q=` | 在已有视频库里检索（立即返回，不产生新检索） |
+| POST | `/api/v1/resolve` | 解析单条作品链接（抖音/小红书/B站/YouTube/TikTok），同步返回 |
+| GET | `/api/v1/resolve/stream?url=&exp=&sig=` | 代理播放解析结果，支持 Range，免 Key 凭签名 |
+| POST | `/api/v1/pages/search` | **全域搜索**：不限站点全网搜，或用 `sites` 指定 24 个站点逐站搜，同步返回（5.14） |
+| GET | `/api/v1/pages/sites` | 全域搜索支持的站点清单与读正文能力 |
+| POST / GET | `/api/v1/pages/read` | 取网页正文（批量最多 20 条 / 单页） |
+| GET | `/api/v1/pages/sources` | 站点能力简表（兼容旧接入） |
 
 ### 5.1 GET /sources
 
@@ -163,7 +181,11 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 ]
 ```
 
-当前 16 个渠道：`bilibili` `douyin` `youku` `tencent` `iqiyi` `acfun` `web_cn` `youtube` `dailymotion` `web_intl` `digitaling` `xinpianchang` `ispot` `adsoftheworld` `adweek` `culturepub`。以接口返回为准。
+当前 18 个渠道：`bilibili` `douyin` `youku` `tencent` `iqiyi` `acfun` `web_cn` `youtube` `dailymotion` `web_intl` `digitaling` `xinpianchang` `ispot` `adsoftheworld` `adweek` `culturepub` `gads` `meta_ads`。以接口返回为准。
+
+- `gads`（Google 广告透明度中心）和 `meta_ads`（Meta 广告资料库）默认不参与批量检索：两者都要额外出口、单次耗时明显更长。显式传 `sources` 时才调用。
+- `gads` 返回的是 YouTube 链接（视频创意的预览里带视频 id），可以直接走 `/resolve` 和下载。同一关键词结果缓存 6 小时。
+- `meta_ads` 有两种模式：配置 `META_AD_LIBRARY_TOKEN` 时走官方 Graph API（字段全、快）；不配置时渲染公开广告库页面取在投视频（约 15 秒，结果缓存 6 小时）。两种模式返回的都是可直接下载的 mp4 直链。
 
 ### 5.1.1 GET /video-types
 
@@ -188,8 +210,10 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `image_url` | string | — | 产品图公网地址，与 `image_base64` **二选一** |
+| `image_url` | string | — | 产品图公网地址。`image_url` / `image_base64` / `query` **三选一** |
 | `image_base64` | string | — | 产品图 base64，可带 `data:image/jpeg;base64,` 前缀 |
+| `query` | string ≤100 | — | **文字检索**：品牌名或产品名，不需要产品图，配合 `query_type` |
+| `query_type` | `brand`/`product` | `product` | `brand`：检索该品牌的官方广告、各条主要产品线（最多 3 条）的同品类爆款、竞品；`product`：检索本品、同品类、竞品、情绪主题、结构形式 |
 | `brief` | string | `""` | 简报：目标、人群、时长、调性、想参考的竞品。**越具体结果越准** |
 | `sources` | string[] | 全部 | 检索渠道 key |
 | `depth` | `quick`/`standard`/`deep` | `standard` | 检索深度，见下表 |
@@ -238,6 +262,17 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 被筛掉的条数按原因记在结果的 `stats.filtered`：`duration` 时长不符、`exclude` 含排除词、`must` 不含必含词、`type` 类型不符、`ad` 非广告正片、`score` 评分过低。
 
 返回 202：`{"task_id", "status": "queued", "status_url"}`
+
+**文字检索**（输入品牌名或产品名，不传图）：
+
+```bash
+curl -X POST https://<服务地址>/api/v1/searches -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"query": "三顿半", "query_type": "brand", "depth": "quick"}'
+```
+
+结果结构与图片检索相同，区别：`product_image_url` 为 `null`；`query`、`query_type` 有值；`product.product_lines` 是识别出的主要产品线；
+维度 key 为 `brand` 品牌官方 / `category`、`line2`、`line3` 各产品线 / `competitor` 竞品（品牌检索），
+或 `product` 本品 / `category` / `competitor` / `emotion` / `structure`（产品检索）。不认识的品牌按名称字面推断品类，结果会偏少。
 
 ### 5.3 POST /searches/upload
 
@@ -425,6 +460,8 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
 
 或 `{"top": 5}` 下载评分最高的 5 条。返回 `task_id`；完成后重新 `GET /runs/{run_id}`，对应视频的 `download.file_url` 即为 mp4。
 
+`urls` 必须取自该次检索结果的 `dimensions[].videos[].url`——不在结果里的地址会返回 `400 invalid_request`（"没有匹配到结果中的视频"）。只想下载单条链接时，用 `POST /resolve` 拿 `stream_url` 自行拉流。
+
 - 单条超过 3 分钟未完成会放弃，`download.error` 写明原因。
 - 抖音需要服务方配置 cookies；新片场、CulturePub 等少数站点不支持下载。
 
@@ -465,6 +502,262 @@ curl -X POST https://<服务地址>/api/v1/searches/upload -H "X-API-Key: $API_K
 
 ---
 
+### 5.11 GET /library?q=（已有视频库）
+
+在历次检索（所有调用方）找到的参考视频里按关键词检索，**立即返回**，不产生新检索、不消耗额度。
+匹配标题、参考点、频道，以及当初检索的品牌 / 产品 / 品类；空格分隔多个词时须全部命中。同一视频只返回一条（分数最高的）。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `q` | 必填 | 关键词，如品牌名或产品名 |
+| `min_score` | 5 | 最低 AI 评分 |
+| `limit` | 60 | 最多返回几条（1~200） |
+| `types` | 不限 | 视频类型 key，逗号分隔 |
+
+```json
+{"total": 40, "items": [{"platform": "Bilibili", "url": "...", "title": "...", "channel": "...", "duration": 15,
+  "views": 120000, "thumbnail": "...", "score": 9, "is_ad": true, "video_type": "tvc", "video_type_name": "TVC 广告",
+  "reference": "...", "embed_url": "...", "dimension": "品牌官方", "brand": "三顿半", "category": "咖啡",
+  "found_at": "2026-10-23 03:45:14"}]}
+```
+
+常见用法：先调 `/library` 展示已有结果，不够时再 `POST /searches` 发起新检索，把新结果按 `url` 去重后追加。
+视频库是公开视频的索引，各调用方共享；不会返回别的调用方的检索 ID 和简报。
+
+---
+
+### 5.12 POST /resolve（单条链接解析）
+
+用户在聊天框、收藏夹、竞品页面里粘贴一条作品链接时用这个接口：**同步返回**元数据和可播放地址，不会创建任务。
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/resolve \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"url": "https://www.bilibili.com/video/BV1re4y1f7NP"}'
+```
+
+```json
+{
+  "platform": "bilibili",
+  "platform_name": "B站",
+  "video_id": "BV1re4y1f7NP",
+  "title": "微笑趣泡气泡水广告2022",
+  "author": "某某账号",
+  "duration": 180.0,
+  "cover": "https://i0.hdslb.com/...",
+  "page_url": "https://www.bilibili.com/video/BV1re4y1f7NP",
+  "max_height": 720,
+  "desc": null,
+  "like": null,
+  "collect": null,
+  "comment": null,
+  "embed_url": "https://player.bilibili.com/player.html?bvid=BV1re4y1f7NP&autoplay=1",
+  "stream_url": "https://videodata.sligenai.cn/api/v1/resolve/stream?url=...&exp=...&sig=..."
+}
+```
+
+**请求**
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `url` | 是 | 作品链接或分享短链 |
+
+**支持的平台与短链**
+
+| 平台 | 域名 | 短链 | 说明 |
+|---|---|---|---|
+| 抖音 | `douyin.com` | `v.douyin.com` | 需要服务器的登录态 cookies，解析约 8~10 秒（要开无头浏览器），全局串行 |
+| 小红书 | `xiaohongshu.com` | `xhslink.com` | **链接必须带 `xsec_token`**（App 里“复制链接”带出来的），否则只能拿到图文页 |
+| B站 | `bilibili.com` | `b23.tv` | 支持 BV / av 号 |
+| YouTube | `youtube.com` / `youtu.be` | — | 需要出口代理 |
+| TikTok | `tiktok.com` | `vm.tiktok.com` | 需要出口代理 |
+
+视频号没有公开网页，不支持解析。
+
+**返回字段**
+
+| 字段 | 说明 |
+|---|---|
+| `platform` / `platform_name` | `douyin` / `xhs` / `bilibili` / `youtube` / `tiktok` |
+| `video_id` | 作品 ID |
+| `title` / `author` / `desc` | 标题、作者、简介 |
+| `duration` | 秒；抖音为浮点，其他取整 |
+| `cover` | 封面图；外链展示建议加 `referrerpolicy="no-referrer"` |
+| `page_url` | 规范化后的作品页地址，也是 `stream_url` 的签名内容 |
+| `max_height` | 解析到的清晰度；**抖音接口不给，为 null** |
+| `like` / `collect` / `comment` | 仅小红书有值 |
+| `embed_url` | 官方 iframe 播放器；TikTok / 小红书通常为 null |
+| `stream_url` | 本服务代理播放地址，**直接放进 `<video src>`**，支持 Range，6 小时有效 |
+
+**行为说明**
+
+- 同一个链接 30 分钟内重复请求命中缓存，不会重复解析。
+- B站 / YouTube 的高清是 DASH 音视频分离的，浏览器不能直接播。首次播放由服务端合并成本地 mp4（后台预取），已缓存时首帧 < 1 秒。
+- 解析失败返回 `400 resolve_failed`，`message` 直接可展示给用户（如“该视频在当前服务器所在地区不可用”）。
+
+---
+
+### 5.13 GET /resolve/stream（代理播放）
+
+`stream_url` 指向的就是这个地址，**不需要 API Key**，凭 URL 里的 `exp` / `sig` 签名访问，方便直接给浏览器 `<video>`：
+
+```html
+<video src="https://videodata.sligenai.cn/api/v1/resolve/stream?url=...&exp=...&sig=..." controls></video>
+```
+
+| 参数 | 说明 |
+|---|---|
+| `url` | 作品链接（`page_url`），签名覆盖此值 |
+| `exp` | 过期时间戳 |
+| `sig` | HMAC 签名，由 `POST /resolve` 生成 |
+
+- 支持 `Range: bytes=0-`，可拖动进度；返回 `206 Partial Content` 和 `video/mp4`。
+- 签名错误或过期返回 `403 forbidden`，重新调用 `POST /resolve` 即可。
+- 直连能拿到字节流的平台（抖音、小红书、B站、YouTube）边下边转；TikTok 这类对裸请求返回 403 的，先用服务端缓存一份 720p 再发。
+
+### 5.14 全域搜索与网页内容（`/pages`）
+
+这一组接口**不限于广告视频**：任意网站的帖子、文章、视频页、讨论都能搜、能读。和检索任务（5.2）不同，它们是**同步**的，不产生 `task_id`，直接返回结果。
+
+| 接口 | 用途 |
+|---|---|
+| `POST /pages/search` | **全域搜索**：不限站点全网搜；或用 `sites` 指定一批站点，逐站检索 |
+| `GET /pages/sites` | 支持的站点清单（key、域名、能不能读正文） |
+| `POST /pages/read` / `GET /pages/read` | 取网页正文 |
+| `GET /pages/sources` | 同 `/pages/sites` 的简版（站点 / 能否读 / 通道），保留兼容 |
+
+#### `POST /pages/search`（全域搜索）
+
+**搜指定站点**（推荐）：每个站各做一次定向检索，并发执行，结果带 `site` 字段，`by_site` 逐站说明成败。
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"query":"AI 视频 广告","sites":["xiaohongshu","douyin","zhihu","reddit"],"per_site":5}'
+```
+
+```json
+{
+  "query": "AI 视频 广告",
+  "count": 20,
+  "results": [
+    {"title": "…", "url": "https://www.xiaohongshu.com/explore/…", "content": "摘要…",
+     "raw_content": null, "site": "xiaohongshu", "site_name": "小红书"}
+  ],
+  "by_site": [
+    {"site": "xiaohongshu", "name": "小红书", "count": 5, "ok": true, "ms": 7700, "error": null},
+    {"site": "reddit", "name": "Reddit", "count": 0, "ok": false, "ms": 16200, "error": "…"}
+  ]
+}
+```
+
+**不限站点**：不传 `sites`，等同全网搜索引擎，返回 `n` 条。
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"query":"AI 视频 广告 创意","n":5,"raw":true}'
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `query` | — | 检索词，中英文都可以 |
+| `sites` | 不传 | 要搜的站点：站点 key（见下表）、中文名（如 `知乎`）、或**直接写域名**（如 `adquan.com`）；`["all"]` 表示下表全部 24 个站。最多 30 项 |
+| `per_site` | 5 | 指定 `sites` 时每个站取几条，1~10 |
+| `n` | 10 | 不传 `sites` 时返回几条，1~20 |
+| `raw` | 见右 | 每条是否带 `raw_content` 全文。不传 `sites` 时默认 `true`；传了 `sites` 默认 `false`——几十个站一起搜时带全文会多占时间和流量 |
+
+响应字段：
+
+| 字段 | 说明 |
+|---|---|
+| `results[].site` / `site_name` | 这条来自哪个站（只在指定 `sites` 时有） |
+| `results[].content` | 搜索摘要 |
+| `results[].raw_content` | 页面全文；`raw=false`、或抓到的是登录/风控提示页时为 `null` |
+| `by_site[]` | 逐站统计：`count` 条数、`ok` 是否成功、`ms` 耗时、`error` 失败原因。**某个站返回 0 条或失败时看这里**，不会让整个请求报错 |
+
+注意：
+
+- 所有站点都失败才返回 `502 search_failed`；`sites` 里有未知站点返回 `400 invalid_sites`。
+- 耗时：实测（2026-11-17，换新关键词避开缓存，经公网域名调用）24 个站并发搜、每站 3 条，约 **10~25 秒**，带全文（`raw=true`）耗时相近；72 条里约四成能拿到正文（视频页、登录墙页拿不到正文）。同步接口，请把请求超时设到 ≥ 60 秒。
+- 搜到链接后，如果需要某条的完整正文，用 `POST /pages/read`；如果是**视频**，要播放或下载，把 `url` 交给 `POST /resolve`（抖音 / 小红书 / B站 / YouTube / TikTok）。
+
+#### `GET /pages/sites`（支持的站点）
+
+返回下表同样的数据，前端可据此渲染站点选择器、提示哪些站读不了正文：
+
+```json
+[{"key":"zhihu","name":"知乎","group":"中文社区","domains":["zhihu.com"],
+  "search":"ok","read":"partial","via":"chrome","note":"专栏文章能读…"}]
+```
+
+#### 站点覆盖（2026-11-17 在线上服务实测）
+
+搜索：下表 24 个站用 `site:` 定向检索**全部能搜到**（每站 10/10 条为站内结果）。读正文：每站取 1~2 条样本，结果会随站点反爬变化。
+
+| 站点 | `sites` 里填 | 搜索 | 读正文 | 说明 |
+|---|---|---|---|---|
+| 掘金 | `juejin` | ✅ | ✅ | 文章页走内容 API，约 0.5s |
+| 知乎 | `zhihu` | ✅ | ⚠️ 部分 | 专栏文章（zhuanlan.zhihu.com）能读，约 40s；问题/回答页被登录墙拦截 |
+| 少数派 | `sspai` | ✅ | ✅ |  |
+| 36氪 | `36kr` | ✅ | ✅ | 约 40~50s；正文后面会带页脚文字 |
+| InfoQ | `infoq` | ✅ | ✅ | xie.infoq.cn 的文章要走浏览器，约 30s |
+| 腾讯云社区 | `tencent_cloud` | ✅ | ✅ |  |
+| CSDN | `csdn` | ✅ | ✅ | 约 40s；偶尔被限流 |
+| 公众号 | `wechat` | ✅ | ✅ | 约 1~2s |
+| 头条 | `toutiao` | ✅ | ✅ | 正文前后带导航文字 |
+| 微博 | `weibo` | ✅ | ✅ | 约 45~50s |
+| 即刻 | `jike` | ✅ | ⚠️ 部分 | m.okjike.com 的单条动态能读；web.okjike.com 是登录页，读不到 |
+| B站 | `bilibili` | ✅ | ✅ | 只有标题、简介和推荐列表，没有字幕；约 20~50s。要视频文件用 POST /resolve |
+| 抖音 | `douyin` | ✅ | ✅ | 只有标题、作者、推荐列表；约 50s。要视频文件用 POST /resolve |
+| 小红书 | `xiaohongshu` | ✅ | ❌ | 笔记页被登录墙拦截，读不到正文；搜索只给标题和摘要。单条视频用 POST /resolve（链接要带 xsec_token） |
+| YouTube | `youtube` | ✅ | ✅ | 返回标题、简介和字幕转录 |
+| TikTok | `tiktok` | ✅ | ✅ | 只有视频描述。要视频文件用 POST /resolve |
+| X | `x` | ✅ | ✅ | 单条推文可读；主页只读到最近几条（未登录视图） |
+| Reddit | `reddit` | ✅ | ⚠️ 部分 | 帖子正文约 1/5 能读到，其余被拦截；搜索可用 |
+| Hacker News | `hn` | ✅ | ✅ |  |
+| Medium | `medium` | ✅ | ✅ |  |
+| Substack | `substack` | ✅ | ✅ |  |
+| LinkedIn | `linkedin` | ✅ | ✅ | Pulse 文章可读；正文后带语言列表 |
+| GitHub | `github` | ✅ | ✅ | 约 55s；正文前带导航文字 |
+| arXiv | `arxiv` | ✅ | ✅ | abs 页给摘要，html/pdf 页给全文 |
+
+读正文的 `via` 通道：`http` 静态页直取（约 1 秒）、`tavily` 境外站与转录（约 1~2 秒）、`chrome` 无头浏览器（20~60 秒）、`api` 前端被拦时改走后端接口（不到 1 秒）。
+`via` 可能写成 `tavily-junk>chrome`，表示第一种方式抓到的是验证页，已自动降级。
+
+#### `POST /pages/read`（批量取正文，最多 20 条）
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/pages/read \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"urls":["https://mp.weixin.qq.com/s/xxx","https://medium.com/about"]}'
+```
+
+```json
+{"results":[
+  {"url":"…","ok":true,"via":"http","chars":1751,"ms":898,"text":"正文纯文本…"},
+  {"url":"…","ok":false,"error":"所有抓取通道均失败：…"}
+]}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `urls` | 目标地址，1~20 条 |
+| `refresh` | 可选，`true` 跳过 30 分钟缓存 |
+
+- 单条失败不影响其他条。并发 4 路取，20 条约 1~3 分钟（取决于有多少条要走浏览器）。
+- **验证页、登录墙不会当成功返回**：人机验证页、`Access Denied`、小红书“当前笔记暂时无法浏览”、抖音“服务器出现问题”等一律判为 `ok=false`，`error` 里写明原因。
+- 返回的 `text` 是页面可见文字，部分站点（36氪、头条、GitHub 等）正文前后会带导航、页脚文字，需要精确正文的话请自行截取。
+
+#### `GET /pages/read`（取单页）
+
+```bash
+curl "https://videodata.sligenai.cn/api/v1/pages/read?url=https%3A%2F%2Fmedium.com%2Fabout" \
+  -H "X-API-Key: $KEY"
+```
+
+返回同上单条结构。
+
 ## 6. 在你的页面里播放视频
 
 ```js
@@ -483,6 +776,24 @@ async function play(video, container) {
 - 抖音播放器是竖屏，容器建议 9:16。
 - 缩略图来自各平台，`<img>` 建议加 `referrerpolicy="no-referrer"`，否则部分平台会拒绝外链。
 - 渲染标题、参考点等文本时请做 HTML 转义，内容来自第三方平台。
+
+**用户直接粘贴一条链接时的播放**（不走检索）：
+
+```js
+// 后端：POST /api/v1/resolve  →  把 stream_url 交给前端
+const d = await fetch("/api/v1/resolve", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-API-Key": KEY },
+  body: JSON.stringify({ url: pastedUrl }),
+}).then(r => r.json());
+
+// 前端：直接播
+container.innerHTML = `<video src="${d.stream_url}" controls playsinline></video>`;
+// 或优先用官方播放器
+if (d.embed_url) container.innerHTML = `<iframe src="${d.embed_url}" allowfullscreen></iframe>`;
+```
+
+`stream_url` 6 小时有效；页面长时间挂着的话，播放失败（403）时重新调一次 `/resolve` 换新地址。
 
 ---
 
@@ -559,12 +870,27 @@ def callback():
 
 | 项 | 说明 |
 |---|---|
-| 检索耗时 | 全部 16 个渠道约 1~3 分钟；只选 3~5 个渠道约 30~60 秒 |
-| 并发 | 同时执行的检索默认 2 个（服务方可调），其余排队 |
+| 检索耗时 | 默认 16 个渠道约 1~3 分钟；只选 3~5 个渠道约 30~60 秒。只选 B站 时约 30~60 秒；含 YouTube 的检索明显更慢（要走出口代理）。`gads` 受 Google 限流，只适合单个关键词按需查询（结果缓存 6 小时），不要放进批量检索 |
+| 并发 | 同时执行的检索默认 2 个（服务方可调），其余排队；第 3 个起 `queue_position` > 0 |
 | 轮询频率 | 建议 3~5 秒一次 |
 | 图片 | jpg / png / webp，≤ 15MB；包装正面、背景干净时识别最准 |
 | 结果稳定性 | 来自第三方平台的实时搜索，同样的输入每次结果会有差异；个别渠道偶尔失败会记录在 `errors` |
 | 版权 | 下载的视频仅供内部参考学习，不要二次发布或商用 |
+
+### 8.1 单条链接解析的实测性能（2026-11-04，服务端不含公网时延）
+
+| 平台 | 首次解析 | 缓存命中 | 首帧（Range 1MB） | 说明 |
+|---|---|---|---|---|
+| B站 | 4.7 s | 0.15 s | 0.13~0.27 s | 需服务端合并 DASH |
+| YouTube | 3.0 s | 0.15 s | 0.13~0.28 s | 走出口代理 |
+| TikTok | 2.1 s | 0.16 s | 0.68~0.82 s | 走出口代理，首播可能要等缓存 |
+| 抖音 | 8.3 s | 0.16 s | 0.34~0.43 s | 需要无头浏览器，全局串行 |
+| 小红书 | 1.8 s | 0.16 s | 0.34~0.40 s | 链接须带 `xsec_token` |
+
+- 解析结果缓存 30 分钟；合并后的 mp4 缓存 6 小时。
+- 服务端单机容量（4 核 / 7.2GB，单进程）：轻量接口约 **140 req/s**，缓存命中的 `/resolve` 约 **120 req/s**，压到 256 并发无错误；超过后时延线性上升，不会报错。
+- 检索任务跑满（2 个）时，`/resolve` p95 **25 ms**、播放 p95 **57 ms**，互不阻塞。
+- `POST /resolve` 是同步接口，抖音最慢约 10 秒；前端请设置 ≥ 60 秒超时。
 
 ---
 
@@ -581,6 +907,17 @@ def callback():
 | `SIGNING_SECRET` | 否 | 文件签名密钥；不配置时自动生成并保存在 `runs/.signing_secret` |
 | `FILE_URL_TTL` | 否 | 文件链接有效期（秒），默认 604800（7 天） |
 | `SEARCH_WORKERS` | 否 | 同时执行的检索数，默认 2 |
+| `YOUTUBE_API_KEY` | 否 | YouTube Data API v3 key。配置后 YouTube 搜索走官方接口（无风控、字段全），失败或配额用完自动回退 yt-dlp |
+| `YOUTUBE_DAILY_QUOTA` | 否 | 每天配额单位，默认 10000；`search.list` 每次 100，`videos.list` 每次 1。按天记录在 `runs/_yt_quota.json` |
+| `YOUTUBE_CACHE_TTL` | 否 | 同一关键词搜索结果缓存秒数，默认 21600（6 小时） |
+| `META_AD_LIBRARY_TOKEN` | 否 | Meta 广告资料库 access token（需完成身份验证的开发者账号）。不配置时改渲染公开广告库页面，仍能取到在投视频 |
+| `META_AD_LIBRARY_VERSION` | 否 | Graph API 版本，默认 `v23.0` |
+| `META_AD_LIBRARY_COUNTRIES` | 否 | 投放国家代码，逗号分隔，默认 `US,GB,DE,FR,JP` |
+| `PROXY_URL` | 否 | 出口代理（`socks5h://` 让 DNS 也在代理侧解析）。只有 youtube/tiktok/bilibili/gads/meta 走代理 |
+| `PROXY_URLS` | 否 | 多个出口，逗号分隔，按顺序探测自动切换 |
+| `DOWNLOAD_PROXY_URL` / `DOWNLOAD_PROXY_URLS` | 否 | 下载专用出口；不配置时与搜索共用 |
+| `PLATFORM_PROXY` | 否 | 按平台指定出口，如 `gads=socks5h://127.0.0.1:1083,meta=socks5h://127.0.0.1:1083` |
+| `GADS_PROXY_URLS` | 否 | Google 广告透明度中心的出口池（逗号分隔），被限流时轮换 |
 
 修改后重启服务（`docker compose up -d` 或 `./start.sh`）。
 

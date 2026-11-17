@@ -124,10 +124,10 @@ def img(u: str = "", run: str = "", w: int = 480):
     """缩略图：外站封面（u=地址）或某次检索的产品图（run=ID），缩小后缓存，浏览器缓存 30 天。"""
     if run:
         try:
-            rel = f"{run}/{pipeline.load(run).get('image', 'product.jpg')}"
+            name = pipeline.load(run).get('image', 'product.jpg')
         except (FileNotFoundError, ValueError):
             raise HTTPException(404)
-        path = images.local_thumb(rel, w)
+        path = images.local_thumb(f"{run}/{name}", w) if name else None  # 文字检索没有产品图
     elif u.startswith(("http://", "https://")):
         path = images.remote_thumb(u, w)
     else:
@@ -265,15 +265,17 @@ class RerunReq(BaseModel):
 
 # ---------------- 检索 / 下载任务（提交与失败重试共用） ----------------
 def _search_job(spec: dict) -> str:
-    """spec：image（服务器上的图片路径）、brief、platforms、opts（run_search 参数）、title、meta、cleanup。"""
-    image = Path(spec["image"])
-    if not image.exists():
+    """spec：image（服务器上的图片路径）或 query（[检索词, brand/product]，文字检索）、brief、platforms、
+    opts（run_search 参数）、title、meta、cleanup。"""
+    image = Path(spec["image"]) if spec.get("image") else None
+    query, qtype = spec.get("query") or (None, None)
+    if image and not image.exists():
         raise tasks.RetryError(410, "原图已被清理，请重新上传图片后检索")
 
     def work(progress):
-        res = pipeline.run_search(str(image), spec["brief"], tuple(spec["platforms"]), progress=progress,
-                                  **spec["opts"])
-        if spec.get("cleanup"):  # 上传的临时图只在成功后删；失败时留着，供“重试”使用
+        res = pipeline.run_search(str(image) if image else None, spec["brief"], tuple(spec["platforms"]),
+                                  progress=progress, query=query, query_type=qtype, **spec["opts"])
+        if image and spec.get("cleanup"):  # 上传的临时图只在成功后删；失败时留着，供“重试”使用
             image.unlink(missing_ok=True)
         return res
 
@@ -317,7 +319,8 @@ def retry_task(jid: str):
 def rerun(req: RerunReq):
     try:
         old = pipeline.load(req.run_id)
-        image = pipeline.run_image(req.run_id)
+        text = pipeline.run_query(req.run_id)
+        image = None if text else pipeline.run_image(req.run_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(404, "找不到该次检索")
     pfs = tuple(p for p in req.platforms if p in SOURCES) or pipeline.DEFAULT_SOURCES
@@ -330,10 +333,11 @@ def rerun(req: RerunReq):
 
     title = (old.get("analysis", {}).get("product", {}).get("name") or brief or req.run_id)[:40]
     return {"job_id": _search_job({
-        "image": str(image), "brief": brief, "platforms": list(pfs), "cleanup": False, "title": f"重新检索：{title}",
+        "image": str(image) if image else None, "query": list(text) if text else None,
+        "brief": brief, "platforms": list(pfs), "cleanup": False, "title": f"重新检索：{title}",
         "opts": {"filters": f, "depth": depth, "target_count": target,
                  "min_score": o.get("min_score", 5), "max_duration": o.get("max_duration", 300)},
-        "meta": {"from_run": req.run_id, "image": f"/runs/{req.run_id}/{image.name}", "platforms": list(pfs)}})}
+        "meta": {"from_run": req.run_id, "image": f"/runs/{req.run_id}/{image.name}" if image else "", "platforms": list(pfs)}})}
 
 
 @app.post("/api/search")
