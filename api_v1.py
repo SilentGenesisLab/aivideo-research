@@ -1029,7 +1029,7 @@ class PageReadResponse(BaseModel):
 
 
 class PageSearchRequest(BaseModel):
-    query: str = Field(..., description="检索词")
+    query: str = Field(..., min_length=1, pattern=r"\S", description="检索词，不能为空")
     n: int = Field(10, ge=1, le=20, description="返回条数（不传 sites 时生效）")
     raw: bool | None = Field(None, description="是否返回每条网页的正文。不传：全网检索默认 true，指定 sites 时默认 false（几十个站一起搜时带全文会很慢）")
     sites: list[str] | None = Field(None, max_length=30, description=(
