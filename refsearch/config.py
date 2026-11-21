@@ -138,6 +138,34 @@ INBOX_TIMEOUT = int(os.environ.get("INBOX_TIMEOUT") or 1800)
 
 RUNS_DIR = Path(os.environ.get("RUNS_DIR", ROOT / "runs"))
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
+# 磁盘保护（小盘服务器必设）：中转播放缓存 / 解析落盘缓存的上限（MB），下载件保留天数（0 = 不自动清理）
+PLAY_CACHE_LIMIT_MB = int(os.environ.get("PLAY_CACHE_LIMIT_MB") or 3072)
+RESOLVE_CACHE_LIMIT_MB = int(os.environ.get("RESOLVE_CACHE_LIMIT_MB") or 1024)
+DOWNLOAD_RETENTION_DAYS = float(os.environ.get("DOWNLOAD_RETENTION_DAYS") or 0)
+
+# 视频本体存放方式：local = 本机下载并存盘（默认，原行为）；
+# edge = 本机不存视频本体：下载与分析交给边缘端（如 4090，国内站点直连源站），本机只存检索结果与回传的笔记；
+# 中转/解析缓存放内存盘 EPHEMERAL_DIR（重启即清，不占磁盘）。
+VIDEO_STORAGE = (os.environ.get("VIDEO_STORAGE") or "local").strip().lower()
+EDGE_MODE = VIDEO_STORAGE == "edge"
+EPHEMERAL_DIR = Path(os.environ.get("EPHEMERAL_DIR") or "/dev/shm/videodata")
+
+
+def _link_ephemeral_caches() -> None:
+    """edge 模式：runs/_cache、runs/_resolve 指向内存盘。只在链接位置不存在时创建，
+    已有真实目录（旧磁盘缓存）不动，由部署者先搬走。"""
+    for name in ("_cache", "_resolve"):
+        link, real = RUNS_DIR / name, EPHEMERAL_DIR / name
+        try:
+            real.mkdir(parents=True, exist_ok=True)
+            if not link.exists() and not link.is_symlink():
+                link.symlink_to(real, target_is_directory=True)
+        except OSError:
+            pass
+
+
+if EDGE_MODE:
+    _link_ephemeral_caches()
 
 
 def ffmpeg_path() -> str | None:

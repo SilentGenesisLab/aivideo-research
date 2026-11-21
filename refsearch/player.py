@@ -15,7 +15,7 @@ from . import config, downloader
 from .searchers import UA
 
 CACHE_DIR = config.RUNS_DIR / "_cache"
-CACHE_LIMIT = 3 * 1024 ** 3  # 中转缓存上限 3GB，超出删最旧的
+CACHE_LIMIT = config.PLAY_CACHE_LIMIT_MB * 1024 ** 2  # 中转缓存上限（默认 3GB，可用 PLAY_CACHE_LIMIT_MB 调），超出删最旧的
 RELAY_HEIGHT = 480
 
 # (地址匹配, 官方内嵌播放器)

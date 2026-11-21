@@ -353,6 +353,21 @@ def offline_global_search():
     check("必应标题相关性：空格分词仍然有效", _title_matches("Nike 2026 Commercial", "nike commercial"))
 
 
+def offline_douyin_id():
+    """抖音作品 ID：全域搜索返回的各种链接形式。"""
+    from refsearch.resolve import douyin_id
+    cases = {
+        "https://www.douyin.com/video/7151723653363797288": "7151723653363797288",
+        "https://www.douyin.com/shipin/7365020279564863514": "7365020279564863514",
+        "https://jingxuan.douyin.com/m/video/7708366165261585403": "7708366165261585403",
+        "https://www.douyin.com/jingxuan?modal_id=7600000000000000001": "7600000000000000001",
+        "https://www.douyin.com/zhuanti/7265746676437108770": None,
+        "https://www.douyin.com/user/MS4wLjABAAAA": None,
+    }
+    for u, want in cases.items():
+        check(f"抖音 ID：{u[8:60]}", douyin_id(u) == want, douyin_id(u))
+
+
 if __name__ == "__main__":
     offline()
     offline_filters()
@@ -360,6 +375,7 @@ if __name__ == "__main__":
     offline_text()
     offline_acfun()
     offline_global_search()
+    offline_douyin_id()
     if len(sys.argv) > 1:
         online(sys.argv[1])
     print(f"\n通过 {len(PASS)}，失败 {len(FAIL)}" + (f"：{FAIL}" if FAIL else ""))

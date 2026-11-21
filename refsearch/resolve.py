@@ -60,7 +60,7 @@ _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 1800
 
 STREAM_DIR = config.RUNS_DIR / "_resolve"
-STREAM_LIMIT = 1024 ** 3  # 直链拿不到时才落盘，上限 1GB
+STREAM_LIMIT = config.RESOLVE_CACHE_LIMIT_MB * 1024 ** 2  # 直链拿不到时才落盘，默认上限 1GB（RESOLVE_CACHE_LIMIT_MB 可调）
 
 # 同一个作品的合并任务只跑一次（首播预取和播放请求可能同时到达）
 _LOCAL: dict[str, threading.Lock] = {}
@@ -432,7 +432,7 @@ def cache_local(info: dict, max_height: int = 720) -> Path:
 
 def prewarm(info: dict) -> None:
     """解析成功后先把要合并的片子拉到本地：首帧请求才不会卡着等 yt-dlp。"""
-    if info.get("muxed", True):
+    if info.get("muxed", True) or config.EDGE_MODE:  # edge 模式：不预拉，播放时才按需拉到内存盘
         return
     try:
         cache_local(info)

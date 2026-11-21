@@ -316,8 +316,18 @@ def _balanced(vids: list[dict], n: int, keep_order: bool = False) -> list[dict]:
 
 
 def download_into(result: dict, videos: list[dict], max_height: int = 720, progress=_noop) -> list[dict]:
-    progress(f"④ 开始下载 {len(videos)} 条视频…")
     run_dir = config.RUNS_DIR / result["run_id"]
+    if config.EDGE_MODE:
+        # 本机不存视频本体：保持返回结构不变，标明由边缘端下载，不去源站拉字节
+        progress("④ 本服务不存视频本体：请在 4090 用 tools/edge_fetch.py 直连下载并分析")
+        res = [{"url": v["url"], "title": v.get("title", ""), "ok": False, "file": None, "size_mb": 0,
+                "edge": True, "error": "本服务不存视频本体，请在 4090 用 edge_fetch.py 下载（国内站直连源站）"}
+               for v in videos]
+        result["downloads"] = [d for d in result.get("downloads", [])
+                               if d["url"] not in {r["url"] for r in res}] + res
+        save(result)
+        return res
+    progress(f"④ 开始下载 {len(videos)} 条视频…")
     res = download(videos, run_dir / "videos", max_height, progress)
     for r in res:
         if r["file"]:

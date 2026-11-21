@@ -450,7 +450,8 @@ def job(jid: str):
 def signed_file(path: str, exp: int = 0, sig: str = ""):
     """对外接口给出的限时签名链接（产品图、下载的视频、报告、中转缓存）。"""
     f = (config.RUNS_DIR / path).resolve()
-    if (not security.verify_file(path, exp, sig) or not f.is_relative_to(config.RUNS_DIR.resolve())
+    roots = [config.RUNS_DIR.resolve()] + ([config.EPHEMERAL_DIR.resolve()] if config.EDGE_MODE else [])  # edge：缓存在内存盘
+    if (not security.verify_file(path, exp, sig) or not any(f.is_relative_to(r) for r in roots)
             or f.name.startswith(".") or not f.is_file()):
         raise HTTPException(403, "链接无效或已过期")
     return FileResponse(f)
@@ -467,7 +468,7 @@ class CachedStatic(StaticFiles):
 
 app.mount("/api/v1", api_v1.api)
 app.mount("/static", CachedStatic(directory=WEB), name="static")
-app.mount("/runs", StaticFiles(directory=config.RUNS_DIR), name="runs")
+app.mount("/runs", StaticFiles(directory=config.RUNS_DIR, follow_symlink=config.EDGE_MODE), name="runs")  # edge 模式：_cache 指向内存盘
 
 class SelectiveGZip:
     """压缩页面、脚本和 JSON；视频、图片、下载文件不压缩（已是压缩格式，且要支持断点续传）。"""
@@ -487,6 +488,10 @@ class SelectiveGZip:
 app.add_middleware(SelectiveGZip)
 downloader.backfill()
 _clean_uploads()
+try:
+    downloader.prune_old_downloads()  # 小盘服务器：按 DOWNLOAD_RETENTION_DAYS 清理过期下载件
+except Exception:
+    pass
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

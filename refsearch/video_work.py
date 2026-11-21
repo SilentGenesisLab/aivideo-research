@@ -46,6 +46,8 @@ def downloaded_video(run: dict, url: str) -> Path:
             target = (run_dir / item["file"]).resolve()
             if target.is_relative_to(run_dir / "videos") and target.is_file():
                 return target
+    if config.EDGE_MODE:
+        raise FileNotFoundError("本服务不存视频本体（VIDEO_STORAGE=edge）：局部分析请在存放视频的 4090 上本地做，再用 POST /runs/{run_id}/edge-notes 回传结论")
     raise FileNotFoundError("请先在本次检索中下载该视频")
 
 

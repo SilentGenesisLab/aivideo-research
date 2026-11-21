@@ -161,4 +161,26 @@ def download(videos: list[dict], out_dir: Path, max_height: int = 720,
             if "Unsupported URL" in err:
                 err = "该网站暂不支持自动下载，请打开原链接观看"
             results.append(_fail(v, err[:300]))
+    prune_old_downloads()
     return results
+
+
+def prune_old_downloads(days: float | None = None) -> int:
+    """删除各次检索目录（runs/<时间戳>/）里超过保留天数的视频文件；days<=0 表示不清理。
+    中转缓存（_cache）和解析缓存（_resolve）各有自己的容量上限，不在这里处理。返回删除的文件数。"""
+    days = config.DOWNLOAD_RETENTION_DAYS if days is None else days
+    if not days or days <= 0:
+        return 0
+    cutoff = time.time() - days * 86400
+    n = 0
+    for run in config.RUNS_DIR.iterdir():
+        if not run.is_dir() or run.name.startswith("_"):
+            continue
+        for f in run.rglob("*"):
+            try:
+                if f.is_file() and f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov") and f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
+                    n += 1
+            except OSError:
+                pass
+    return n
