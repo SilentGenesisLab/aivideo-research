@@ -759,28 +759,28 @@ curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
 | 站点 | `sites` 里填 | 搜索 | 读正文 | 说明 |
 |---|---|---|---|---|
 | 掘金 | `juejin` | ✅ | ✅ | 文章页走内容 API，约 0.4s；**链接必须真实存在**，检索返回的失效 ID 会读不到 |
-| 知乎 | `zhihu` | ✅ | ❌ | 2026-11-21 实测专栏文章 3/3 只返回 45 字壳页；需重新导入登录态 Cookie 才能恢复 |
-| 少数派 | `sspai` | ✅ | ✅ |  |
-| 36氪 | `36kr` | ✅ | ✅ | 约 40~50s；正文后面会带页脚文字 |
-| InfoQ | `infoq` | ✅ | ✅ | xie.infoq.cn 的文章要走浏览器，约 30s |
-| 腾讯云社区 | `tencent_cloud` | ✅ | ✅ |  |
+| 知乎 | `zhihu` | ⚠️ 0 条 | ❌ | 检索被博查跳过（0 条）；专栏文章只回登录壳页。需重新导入 Cookie |
+| 少数派 | `sspai` | ✅ | ✅ | 静态页直取，约 1s |
+| 36氪 | `36kr` | ✅ | ✅ | 静态页常回壳页，实际走浏览器，约 8s |
+| InfoQ | `infoq` | ✅ | ✅ | xie.infoq.cn 的文章走浏览器，约 9s |
+| 腾讯云社区 | `tencent_cloud` | ✅ | ✅ | 静态页经代理直取，约 0.8s |
 | CSDN | `csdn` | ✅ | ✅ | 约 40s；偶尔被限流 |
 | 公众号 | `wechat` | ✅ | ✅ | 6/6 读到正文，约 1~2s |
 | 头条 | `toutiao` | ✅ | ✅ | 6/6 读到正文；正文前后带导航文字 |
-| 微博 | `weibo` | ✅ | ✅ | 5/6 读到正文（话题页读不到），约 45~55s |
-| 即刻 | `jike` | ✅ | ⚠️ 部分 | m.okjike.com 的单条动态能读；web.okjike.com 是登录页，读不到 |
+| 微博 | `weibo` | ✅ | ✅ | 单条微博约 8s；话题页读不到 |
+| 即刻 | `jike` | ✅ | ✅ | m.okjike.com 单条动态经代理直取（实测 2809 字）；web 版是登录页 |
 | B站 | `bilibili` | ✅ | ✅ | 只有标题、简介和推荐列表，没有字幕；约 20~50s。要视频文件用 POST /resolve |
-| 抖音 | `douyin` | ✅ | ✅ | 只有标题、作者、推荐列表；约 50s。要视频文件用 POST /resolve |
+| 抖音 | `douyin` | ✅ | ⚠️ 部分 | 检索常返回用户主页，正文很少。要视频文件用 POST /resolve |
 | 小红书 | `xiaohongshu` | ✅ | ❌ | 笔记页只返回登录壳（“当前笔记暂时无法浏览”），读不到正文，本服务判为失败；搜索只给标题和摘要。单条视频用 POST /resolve（链接要带 xsec_token） |
-| YouTube | `youtube` | ✅ | ✅ | yt-dlp 取字幕（约 30s）；需要 YOUTUBE_API_KEY 时短视频页也能取标题简介 |
-| TikTok | `tiktok` | ✅ | ✅ | 只有视频描述。要视频文件用 POST /resolve |
-| X | `x` | ✅ | ✅ | 单条推文可读；主页只读到最近几条（未登录视图） |
-| Reddit | `reddit` | ✅ | ⚠️ 部分 | 帖子正文约 1/5 能读到，其余被拦截；搜索可用 |
-| Hacker News | `hn` | ✅ | ✅ | 官方 Algolia 接口，含评论树，约 1s |
-| Medium | `medium` | ✅ | ✅ |  |
-| Substack | `substack` | ✅ | ✅ | 文章页直取，失败退回该站 RSS，约 2~10s |
-| LinkedIn | `linkedin` | ✅ | ❌ | 登录墙；2026-11-21 起读不到正文（Tavily 下线后无可用通道） |
-| GitHub | `github` | ✅ | ✅ | 约 55s；正文前带导航文字 |
+| YouTube | `youtube` | ✅ | ✅ | 优先 yt-dlp 取字幕，取不到退浏览器 |
+| TikTok | `tiktok` | ⚠️ 0 条 | ⚠️ 未复测 | Tavily 下线后未复测，默认走浏览器。要视频文件用 POST /resolve |
+| X | `x` | ⚠️ 0 条 | ✅ | 单条推文走 syndication 接口；检索被博查跳过 |
+| Reddit | `reddit` | ✅ | ✅ | 帖子正文走浏览器（实测 2838 字）；部分板块被拦 |
+| Hacker News | `hn` | ✅ | ⚠️ 部分 | item 页走 Algolia 接口（含评论树），约 1s；首页读不到 |
+| Medium | `medium` | ⚠️ 常 0 条 | ✅ | 浏览器约 14s（实测 3324 字）；检索常为 0 条 |
+| Substack | `substack` | ✅ | ✅ | 文章页直取，失败退回该站 RSS |
+| LinkedIn | `linkedin` | ✅ | ⚠️ 部分 | 公开营销页可读（实测 8024 字）；个人主页需登录 |
+| GitHub | `github` | ✅ | ✅ | 静态页经代理直取，仓库页约 20s |
 | arXiv | `arxiv` | ✅ | ✅ | abs 页给摘要，html/pdf 页给全文 |
 
 读正文的 `via` 通道：`http` 静态页直取（约 1 秒）、`http+proxy` 境外静态页经代理（约 1~3 秒）、`chrome` 无头浏览器（10~30 秒）、`api` 站点原生接口（掘金 / X / Hacker News / Substack / YouTube 字幕）。
