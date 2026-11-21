@@ -758,8 +758,8 @@ curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
 
 | 站点 | `sites` 里填 | 搜索 | 读正文 | 说明 |
 |---|---|---|---|---|
-| 掘金 | `juejin` | ✅ | ✅ | 文章页走内容 API，约 0.5s |
-| 知乎 | `zhihu` | ✅ | ⚠️ 部分 | 专栏文章（zhuanlan.zhihu.com）6/6 能读，约 40~60s；问题/回答页被登录墙拦截 |
+| 掘金 | `juejin` | ✅ | ✅ | 文章页走内容 API，约 0.4s；**链接必须真实存在**，检索返回的失效 ID 会读不到 |
+| 知乎 | `zhihu` | ✅ | ❌ | 2026-11-21 实测专栏文章 3/3 只返回 45 字壳页；需重新导入登录态 Cookie 才能恢复 |
 | 少数派 | `sspai` | ✅ | ✅ |  |
 | 36氪 | `36kr` | ✅ | ✅ | 约 40~50s；正文后面会带页脚文字 |
 | InfoQ | `infoq` | ✅ | ✅ | xie.infoq.cn 的文章要走浏览器，约 30s |
@@ -772,19 +772,21 @@ curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
 | B站 | `bilibili` | ✅ | ✅ | 只有标题、简介和推荐列表，没有字幕；约 20~50s。要视频文件用 POST /resolve |
 | 抖音 | `douyin` | ✅ | ✅ | 只有标题、作者、推荐列表；约 50s。要视频文件用 POST /resolve |
 | 小红书 | `xiaohongshu` | ✅ | ❌ | 笔记页只返回登录壳（“当前笔记暂时无法浏览”），读不到正文，本服务判为失败；搜索只给标题和摘要。单条视频用 POST /resolve（链接要带 xsec_token） |
-| YouTube | `youtube` | ✅ | ✅ | 返回标题、简介和字幕转录 |
+| YouTube | `youtube` | ✅ | ✅ | yt-dlp 取字幕（约 30s）；需要 YOUTUBE_API_KEY 时短视频页也能取标题简介 |
 | TikTok | `tiktok` | ✅ | ✅ | 只有视频描述。要视频文件用 POST /resolve |
 | X | `x` | ✅ | ✅ | 单条推文可读；主页只读到最近几条（未登录视图） |
 | Reddit | `reddit` | ✅ | ⚠️ 部分 | 帖子正文约 1/5 能读到，其余被拦截；搜索可用 |
-| Hacker News | `hn` | ✅ | ✅ |  |
+| Hacker News | `hn` | ✅ | ✅ | 官方 Algolia 接口，含评论树，约 1s |
 | Medium | `medium` | ✅ | ✅ |  |
-| Substack | `substack` | ✅ | ✅ |  |
-| LinkedIn | `linkedin` | ✅ | ✅ | Pulse 文章可读；正文后带语言列表 |
+| Substack | `substack` | ✅ | ✅ | 文章页直取，失败退回该站 RSS，约 2~10s |
+| LinkedIn | `linkedin` | ✅ | ❌ | 登录墙；2026-11-21 起读不到正文（Tavily 下线后无可用通道） |
 | GitHub | `github` | ✅ | ✅ | 约 55s；正文前带导航文字 |
 | arXiv | `arxiv` | ✅ | ✅ | abs 页给摘要，html/pdf 页给全文 |
 
-读正文的 `via` 通道：`http` 静态页直取（约 1 秒）、`tavily` 境外站与转录（约 1~2 秒）、`chrome` 无头浏览器（20~60 秒）、`api` 前端被拦时改走后端接口（不到 1 秒）。
-`via` 可能写成 `tavily-junk>chrome`，表示第一种方式抓到的是验证页，已自动降级。
+读正文的 `via` 通道：`http` 静态页直取（约 1 秒）、`http+proxy` 境外静态页经代理（约 1~3 秒）、`chrome` 无头浏览器（10~30 秒）、`api` 站点原生接口（掘金 / X / Hacker News / Substack / YouTube 字幕）。
+`via` 可能写成 `http-junk>chrome`，表示第一种方式抓到的是壳页面，已自动降级。
+
+> **2026-11-21 起不再调用 Tavily**（成本过高）。原来走 Tavily 的站已逐站换成直连、代理直连、浏览器或站点接口，实测：少数派 / 腾讯云社区 / arXiv 走 `http`，Substack 走 `api` 或 `http+proxy`，Hacker News 走 Algolia 接口，YouTube 走 yt-dlp 字幕，Medium / Reddit / 头条走 `chrome`。**LinkedIn 现在读不到**（登录墙）。
 
 #### `POST /pages/read`（批量取正文，最多 20 条）
 
