@@ -50,12 +50,14 @@ _YT_CACHE_DIR = config.RUNS_DIR / "_yt_cache"
 _yt_lock = threading.Lock()
 
 
-def _yt_cache_key(query: str, limit: int) -> str:
-    return hashlib.sha1(f"{query}|{limit}".encode()).hexdigest()
+def _yt_cache_key(query: str, limit: int, region: str = "", order: str = "") -> str:
+    # 必须带上 region/order：否则 "coffee"(US) 和 "coffee"(KR) 会命中同一份缓存，
+    # 用户拿到的是别的国家的结果，而且看不出来。
+    return hashlib.sha1(f"{query}|{limit}|{region}|{order}".encode()).hexdigest()
 
 
-def _yt_cache_get(query: str, limit: int) -> list[dict] | None:
-    p = _YT_CACHE_DIR / f"{_yt_cache_key(query, limit)}.json"
+def _yt_cache_get(query: str, limit: int, region: str = "", order: str = "") -> list[dict] | None:
+    p = _YT_CACHE_DIR / f"{_yt_cache_key(query, limit, region, order)}.json"
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -65,10 +67,11 @@ def _yt_cache_get(query: str, limit: int) -> list[dict] | None:
     return d.get("v")
 
 
-def _yt_cache_put(query: str, limit: int, videos: list[dict]) -> None:
+def _yt_cache_put(query: str, limit: int, videos: list[dict],
+                  region: str = "", order: str = "") -> None:
     try:
         _YT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        p = _YT_CACHE_DIR / f"{_yt_cache_key(query, limit)}.json"
+        p = _YT_CACHE_DIR / f"{_yt_cache_key(query, limit, region, order)}.json"
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps({"t": time.time(), "v": videos}, ensure_ascii=False), encoding="utf-8")
         tmp.replace(p)
@@ -101,19 +104,33 @@ def _iso_dur(s: str) -> int | None:
     return d * 86400 + h * 3600 + mi * 60 + se
 
 
-def _youtube_api(query: str, limit: int) -> list[dict]:
+def _youtube_api(query: str, limit: int, region: str = "", order: str = "") -> list[dict]:
     if not _yt_take_quota(100):
         raise RuntimeError("YouTube Data API 当日配额已用完")
+    params = {"key": config.YOUTUBE_API_KEY, "part": "snippet", "type": "video",
+              "q": query, "maxResults": min(50, max(1, limit))}
+    if region:
+        params["regionCode"] = region.upper()
+    if order:
+        params["order"] = order
     r = requests.get("https://www.googleapis.com/youtube/v3/search", timeout=20,
-                     proxies=_proxies("youtube"),
-                     params={"key": config.YOUTUBE_API_KEY, "part": "snippet", "type": "video",
-                             "q": query, "maxResults": min(50, max(1, limit))})
+                     proxies=_proxies("youtube"), params=params)
     j = r.json()
     if "error" in j:
         raise RuntimeError(j["error"].get("message", "YouTube API 错误"))
     entries = j.get("items") or []
-    ids = [e.get("id", {}).get("videoId") for e in entries]
-    ids = [i for i in ids if i]
+    return _yt_enrich(entries)
+
+
+def _yt_enrich(entries: list[dict]) -> list[dict]:
+    """search.list / videos.list 的条目 → 统一字段。videos.list 补时长和播放量，1 单位。"""
+    ids = []
+    for e in entries:
+        vid = e.get("id")
+        if isinstance(vid, dict):
+            vid = vid.get("videoId")
+        if vid:
+            ids.append(vid)
     stats = {}
     if ids and _yt_take_quota(1):
         vr = requests.get("https://www.googleapis.com/youtube/v3/videos", timeout=20,
@@ -123,7 +140,9 @@ def _youtube_api(query: str, limit: int) -> list[dict]:
         stats = {v["id"]: v for v in vr.get("items") or []}
     out = []
     for e in entries:
-        vid = e.get("id", {}).get("videoId")
+        vid = e.get("id")
+        if isinstance(vid, dict):
+            vid = vid.get("videoId")
         if not vid:
             continue
         sn = e.get("snippet") or {}
@@ -134,6 +153,40 @@ def _youtube_api(query: str, limit: int) -> list[dict]:
             "YouTube", vid, f"https://www.youtube.com/watch?v={vid}", sn.get("title", ""),
             sn.get("channelTitle", ""), _iso_dur((v.get("contentDetails") or {}).get("duration")),
             (v.get("statistics") or {}).get("viewCount"), thumb or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+            sn.get("description") or "", (sn.get("publishedAt") or "")[:10],
+        ))
+    return out
+
+
+def _youtube_trending(region: str, limit: int = 25, category: str = "") -> list[dict]:
+    """某国家/地区的热门视频榜（chart=mostPopular）。
+
+    比 search.list 便宜 100 倍：videos.list 只要 1 单位，search.list 要 100。
+    查"某国爆款"应该用这个，而不是拿关键词去搜再按播放量排。
+    """
+    params = {"key": config.YOUTUBE_API_KEY, "part": "snippet,statistics,contentDetails",
+              "chart": "mostPopular", "regionCode": (region or "US").upper(),
+              "maxResults": min(50, max(1, limit))}
+    if category:
+        params["videoCategoryId"] = str(category)
+    if not _yt_take_quota(1):
+        raise RuntimeError("YouTube Data API 当日配额已用完")
+    r = requests.get("https://www.googleapis.com/youtube/v3/videos", timeout=20,
+                     proxies=_proxies("youtube"), params=params)
+    j = r.json()
+    if "error" in j:
+        raise RuntimeError(j["error"].get("message", "YouTube API 错误"))
+    # 已带 part=statistics，直接构造，不再多花 1 单位
+    out = []
+    for e in j.get("items") or []:
+        vid = e.get("id")
+        sn = e.get("snippet") or {}
+        th = sn.get("thumbnails") or {}
+        thumb = (th.get("maxres") or th.get("high") or th.get("medium") or th.get("default") or {}).get("url")
+        out.append(_video(
+            "YouTube", vid, f"https://www.youtube.com/watch?v={vid}", sn.get("title", ""),
+            sn.get("channelTitle", ""), _iso_dur((e.get("contentDetails") or {}).get("duration")),
+            (e.get("statistics") or {}).get("viewCount"), thumb or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
             sn.get("description") or "", (sn.get("publishedAt") or "")[:10],
         ))
     return out
@@ -162,19 +215,39 @@ def _youtube_ytdlp(query: str, limit: int) -> list[dict]:
     return out
 
 
-def search_youtube(query: str, limit: int = 8) -> list[dict]:
-    hit = _yt_cache_get(query, limit)
+def search_youtube(query: str, limit: int = 8, region: str = "", order: str = "") -> list[dict]:
+    """YouTube 检索。
+
+    region（ISO 国家码，如 US/KR/JP）和 order（date/rating/relevance/title/videoCount/viewCount）
+    只在配了 YOUTUBE_API_KEY 时生效；没 key 走 yt-dlp 时忽略，不会报错。
+    想要"某国爆款榜"用它下面的 youtube_trending()，那个便宜 100 倍。
+    """
+    hit = _yt_cache_get(query, limit, region, order)
     if hit is not None:
         return hit
     if config.YOUTUBE_API_KEY:
         try:
-            out = _youtube_api(query, limit)
+            out = _youtube_api(query, limit, region, order)
         except Exception:
             out = _youtube_ytdlp(query, limit)
     else:
         out = _youtube_ytdlp(query, limit)
     if out:
-        _yt_cache_put(query, limit, out)
+        _yt_cache_put(query, limit, out, region, order)
+    return out
+
+
+def youtube_trending(region: str = "US", limit: int = 25, category: str = "") -> list[dict]:
+    """某国热门视频榜。没配 key 时抛 RuntimeError（该能力只能走官方 API）。"""
+    if not config.YOUTUBE_API_KEY:
+        raise RuntimeError("需要配置 YOUTUBE_API_KEY 才能取热门榜")
+    key = f"__trending__|{region}|{category}"
+    hit = _yt_cache_get(key, limit)
+    if hit is not None:
+        return hit
+    out = _youtube_trending(region, limit, category)
+    if out:
+        _yt_cache_put(key, limit, out)
     return out
 
 

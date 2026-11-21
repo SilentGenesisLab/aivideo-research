@@ -29,6 +29,29 @@ def init():
             status INTEGER, ms INTEGER, ip TEXT)""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_req_ts ON requests(ts)")
         c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - KEEP_DAYS * 86400,))
+        # 全域搜索：批次级汇总 + 逐站明细。requests 只有状态码，看不出"哪一站变薄了"
+        c.execute("""CREATE TABLE IF NOT EXISTS page_searches (
+            ts REAL, day TEXT, batch_id TEXT, client TEXT, query TEXT, ip TEXT,
+            sites_requested INTEGER, sites_total INTEGER, sites_normal INTEGER,
+            sites_empty INTEGER, sites_never_arrived INTEGER, sites_timeout INTEGER,
+            sites_upstream_fail INTEGER, sites_config_error INTEGER,
+            total_ms INTEGER, slowest_site TEXT, slowest_ms INTEGER,
+            sites_dropped_filter INTEGER, sites_rate_limited INTEGER)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS page_search_sites (
+            batch_id TEXT, ts REAL, site TEXT, ok INTEGER, count INTEGER,
+            error_class TEXT, ms INTEGER, start_ts REAL, end_ts REAL,
+            raw_count INTEGER)""")
+        # 老库补列（2026-11-19 之前建的没有这两列）
+        for tbl, col in (("page_searches", "sites_dropped_filter INTEGER"),
+                         ("page_searches", "sites_rate_limited INTEGER"),
+                         ("page_search_sites", "raw_count INTEGER")):
+            cols = {r[1] for r in c.execute("PRAGMA table_info(%s)" % tbl)}
+            if col.split()[0] not in cols:
+                c.execute("ALTER TABLE %s ADD COLUMN %s" % (tbl, col))
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ps_ts ON page_searches(ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pss_batch ON page_search_sites(batch_id)")
+        c.execute("DELETE FROM page_searches WHERE ts < ?", (time.time() - KEEP_DAYS * 86400,))
+        c.execute("DELETE FROM page_search_sites WHERE ts < ?", (time.time() - KEEP_DAYS * 86400,))
 
 
 def log_request(client: str, method: str, route: str, path: str, status: int, ms: int, ip: str):
@@ -38,6 +61,41 @@ def log_request(client: str, method: str, route: str, path: str, status: int, ms
             c.execute("INSERT INTO requests VALUES (?,?,?,?,?,?,?,?,?)",
                       (now, time.strftime("%Y-%m-%d", time.localtime(now)), client, method, route,
                        path[:300], status, ms, ip))
+    except sqlite3.Error:
+        pass
+
+
+def log_page_search(client: str, ip: str, query: str, by_site: list[dict], sites_requested: int,
+                    total_ms: int, batch_id: str | None = None) -> None:
+    """记录一次全域搜索：批次汇总 + 逐站明细。
+
+    error_class 为 None 才算正常；empty_result（Tavily 真返回 0 条）和 off_domain
+    （Tavily 返回了但都是站外结果）要分开计——只看状态码会把它俩都当成成功。
+    """
+    if not by_site:
+        return
+    now = time.time()
+    day = time.strftime("%Y-%m-%d", time.localtime(now))
+    batch_id = batch_id or by_site[0].get("batch_id") or ""
+    cls = Counter(b.get("error_class") for b in by_site)
+    slow = max(by_site, key=lambda b: b.get("ms") or 0)
+    try:
+        with _lock, _conn() as c:
+            c.execute("INSERT INTO page_searches VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      (now, day, batch_id, client, query[:200], ip[:60],
+                       sites_requested, len(by_site), cls.get(None, 0),
+                       cls.get("empty_result", 0), cls.get("never_arrived", 0),
+                       cls.get("timeout", 0), cls.get("upstream_fail", 0),
+                       cls.get("config_error", 0) + cls.get("invalid", 0),
+                       total_ms, slow.get("site"), slow.get("ms") or 0,
+                       cls.get("dropped_by_filter", 0), cls.get("rate_limited", 0)))
+            c.executemany(
+                "INSERT INTO page_search_sites (batch_id, ts, site, ok, count, error_class,"
+                " ms, start_ts, end_ts, raw_count) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [(batch_id, now, b.get("site"), 1 if b.get("ok") else 0,
+                  b.get("count") or 0, b.get("error_class"), b.get("ms") or 0,
+                  b.get("start_ts") or now, b.get("end_ts") or now,
+                  b.get("raw_count")) for b in by_site])
     except sqlite3.Error:
         pass
 

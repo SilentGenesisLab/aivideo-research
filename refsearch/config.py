@@ -113,6 +113,28 @@ WEBGRAB_BASE = (os.environ.get("WEBGRAB_BASE") or "https://chorify3.sligenai.cn/
 WEBGRAB_TOKEN = os.environ.get("WEBGRAB_TOKEN", "")
 WEBGRAB_TIMEOUT = int(os.environ.get("WEBGRAB_TIMEOUT") or 180)
 WEBGRAB_WORKERS = int(os.environ.get("WEBGRAB_WORKERS") or 4)
+# 全域搜索：24 个站各一次请求。6 并发要跑 4 批，总时长是批次最大值之和（实测 3.1 倍）；
+# 16 并发实测降到 1.0 倍。BUDGET 是整批的总时限，超过就返回已拿到的部分。
+WEBGRAB_SEARCH_WORKERS = int(os.environ.get("WEBGRAB_SEARCH_WORKERS") or 16)
+WEBGRAB_SEARCH_BUDGET = int(os.environ.get("WEBGRAB_SEARCH_BUDGET") or 120)
+# "all" 展开的站点。每站一次计费调用，24 站 = 24 倍成本。留空用 webgrab.DEFAULT_CORE。
+WEBGRAB_CORE_SITES = os.environ.get("WEBGRAB_CORE_SITES", "")
+
+# 检索后端：bocha（博查，默认）/ tavily / hybrid（博查优先，空则该站回落 Tavily）
+# 博查每次调用 1 次额度、5000 次；Tavily advanced 每次 2 credits。24 站一次全域搜索：
+# 博查 24 次额度，Tavily 48 credits——这是换后端的主要动机。
+SEARCH_PROVIDER = (os.environ.get("SEARCH_PROVIDER") or "bocha").strip().lower()
+BOCHA_API_KEY = os.environ.get("BOCHA_API_KEY", "")
+BOCHA_BASE = (os.environ.get("BOCHA_BASE") or "https://api.bocha.cn/v1/web-search").rstrip()
+BOCHA_TIMEOUT = int(os.environ.get("BOCHA_TIMEOUT") or 30)
+# 博查限并发：实测 2 并发 12/12 成功，4 并发就开始 429。别照搬 WEBGRAB_SEARCH_WORKERS。
+BOCHA_WORKERS = int(os.environ.get("BOCHA_WORKERS") or 2)
+
+# ---------------- 收件箱服务（4090）：微信视频号 ----------------
+# 视频号没有公开网页，只能让 4090 上的下载器去抓。密钥只从环境变量读，不要写进仓库。
+INBOX_KEY = os.environ.get("INBOX_KEY", "")
+INBOX_SITE = (os.environ.get("INBOX_SITE") or "https://oss3.sligenai.cn/_share/inbox-7k3q").rstrip("/")
+INBOX_TIMEOUT = int(os.environ.get("INBOX_TIMEOUT") or 1800)
 
 RUNS_DIR = Path(os.environ.get("RUNS_DIR", ROOT / "runs"))
 RUNS_DIR.mkdir(parents=True, exist_ok=True)

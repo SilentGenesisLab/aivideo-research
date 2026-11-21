@@ -20,6 +20,7 @@
 | 参考平台 | 15 个人工补充检索的平台及搜索链接，其中 7 个可通过接口直接取作品 |
 | 可选下载 | 指定视频下载为 mp4（H.264/AAC），返回限时下载链接 |
 | 单条链接解析 | 给一条抖音 / 小红书 / B站 / YouTube / TikTok 链接，直接返回元数据 + 可播放地址（见 5.12） |
+| 微信视频号 | 给一条 `https://weixin.qq.com/sph/...` 链接，让 4090 下载 mp4 / 封面 / 12 帧拼图（异步，3–4 分钟，全公司每天 40 条，见 5.15） |
 | 全域搜索 | 一次搜 24 个站（抖音、小红书、B站、知乎、微博、X、Reddit、YouTube、TikTok、GitHub 等）的网页、帖子、视频页，或不限站点全网搜；结果标明来自哪个站（见 5.14） |
 | 网页正文 | 给任意网页地址，返回正文纯文本（见 5.14） |
 
@@ -166,7 +167,7 @@ queued（排队）──▶ running（执行中）──▶ succeeded（成功�
 | GET | `/api/v1/library?q=` | 在已有视频库里检索（立即返回，不产生新检索） |
 | POST | `/api/v1/resolve` | 解析单条作品链接（抖音/小红书/B站/YouTube/TikTok），同步返回 |
 | GET | `/api/v1/resolve/stream?url=&exp=&sig=` | 代理播放解析结果，支持 Range，免 Key 凭签名 |
-| POST | `/api/v1/pages/search` | **全域搜索**：不限站点全网搜，或用 `sites` 指定 24 个站点逐站搜，同步返回（5.14） |
+| POST | `/api/v1/pages/search` | **全网搜索**：默认搜 8 个核心站 + 一次通用全网；也可用 `sites` 指定站点逐站搜，同步返回（5.14） |
 | GET | `/api/v1/pages/sites` | 全域搜索支持的站点清单与读正文能力 |
 | POST / GET | `/api/v1/pages/read` | 取网页正文（批量最多 20 条 / 单页） |
 | GET | `/api/v1/pages/sources` | 站点能力简表（兼容旧接入） |
@@ -621,14 +622,51 @@ curl -X POST https://videodata.sligenai.cn/api/v1/resolve \
 
 | 接口 | 用途 |
 |---|---|
-| `POST /pages/search` | **全域搜索**：不限站点全网搜；或用 `sites` 指定一批站点，逐站检索 |
+| `POST /pages/search` | **全网搜索**：默认「核心站定向 + 通用全网」两类一起返回；或用 `sites` 指定站点只做定向 |
 | `GET /pages/sites` | 支持的站点清单（key、域名、能不能读正文） |
 | `POST /pages/read` / `GET /pages/read` | 取网页正文 |
 | `GET /pages/sources` | 同 `/pages/sites` 的简版（站点 / 能否读 / 通道），保留兼容 |
 
-#### `POST /pages/search`（全域搜索）
+#### `POST /pages/search`（全网搜索）
 
-**搜指定站点**（推荐）：每个站各做一次定向检索，并发执行，结果带 `site` 字段，`by_site` 逐站说明成败。
+**这里有两种检索，结果混在一起返回，用每条结果的 `source` 字段区分：**
+
+| `source` | 是什么 | 能搜到 | 成本 |
+|---|---|---|---|
+| `site` | **定向**：对每个登记站各做一次 `site:域名` 查询 | 某个**平台上**的具体内容（B站视频、小红书笔记、知乎专栏…） | 每站 1 次调用 |
+| `web` | **通用**：一次不限站点的全网查询 | 素材、灵感、行业通稿——散落在**任意**站点的内容 | 1 次调用 |
+
+**为什么两种都要**：定向能保证覆盖你要的平台，但搜不到散落在别处的内容；通用反过来。
+实测单次通用检索在 20 条里几乎命中不到这 24 个站（博查 0/24、Tavily 2/24）——
+所以不能只做通用，也不能只做定向。
+
+**默认行为**（不传 `sites`）：8 个核心站定向 + 1 次通用，两类一起返回。
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"query":"AI 视频 广告 创意"}'
+```
+
+返回里 `results` 每条带 `source`，`by_site` 逐站统计（通用那一条的 `site` 值是 `_web`）：
+
+```json
+{
+  "count": 41,
+  "results": [
+    {"title": "…", "url": "https://www.bilibili.com/video/…", "source": "site", "site": "bilibili"},
+    {"title": "…", "url": "https://www.adquan.com/…", "source": "web", "site": null}
+  ],
+  "by_site": [
+    {"site": "bilibili", "name": "B站", "count": 5, "ok": true, "provider": "bocha"},
+    {"site": "_web", "name": "全网通用", "count": 10, "ok": true, "provider": "bocha"}
+  ]
+}
+```
+
+**只想要其中一种**：传 `sites` 就只做定向；`sites: ["web"]` 就只做通用。
+
+**定向检索**：每个站各做一次 `site:` 查询，并发执行，结果带 `site` 字段。
 
 ```bash
 curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
@@ -662,9 +700,9 @@ curl -X POST https://videodata.sligenai.cn/api/v1/pages/search \
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `query` | — | 检索词，中英文都可以 |
-| `sites` | 不传 | 要搜的站点：站点 key（见下表）、中文名（如 `知乎`）、或**直接写域名**（如 `adquan.com`）；`["all"]` 表示下表全部 24 个站。最多 30 项 |
+| `sites` | 不传 | 不传 = 核心站定向 + 通用全网。传了就**只做定向**：站点 key（见下表）、中文名（如 `知乎`）、或**直接写域名**（如 `adquan.com`）；`["all"]` 表示下表全部 24 个站；`["web"]` 表示只做通用全网。最多 30 项 |
 | `per_site` | 5 | 指定 `sites` 时每个站取几条，1~10 |
-| `n` | 10 | 不传 `sites` 时返回几条，1~20 |
+| `n` | 10 | 通用全网检索返回几条，1~20 |
 | `raw` | 见右 | 每条是否带 `raw_content` 全文。不传 `sites` 时默认 `true`；传了 `sites` 默认 `false`——几十个站一起搜时带全文会多占时间和流量 |
 
 响应字段：
@@ -757,6 +795,72 @@ curl "https://videodata.sligenai.cn/api/v1/pages/read?url=https%3A%2F%2Fmedium.c
 ```
 
 返回同上单条结构。
+
+### 5.15 微信视频号（`/wxv`）
+
+视频号没有公开网页，也没有可用的提取器，本服务不自己解析：请求转发给公司 4090 上的收件箱服务下载，
+下载完把 **mp4 视频 / 封面 / 12 帧拼图** 取回本服务的结果目录，再给免登录的限时签名链接。
+
+- **异步任务**：一条约 3–4 分钟，不占你的连接。
+- **全公司每天最多 40 条**，不要拿来批量刷；以前存过的用 5.15.2 检索，别重复下载。
+- 上游是第三方免费站点，可能失效。失败时 `error` 里是上游原文，按它判断，不要自己编原因。
+- 一次最多 3 条链接。
+
+#### 5.15.1 下载
+
+```bash
+curl -X POST https://<服务地址>/api/v1/wxv \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"text": "https://weixin.qq.com/sph/AmMSMNlv7N", "note": "竞品新品发布"}'
+# → {"task_id": "...", "status": "queued", "status_url": "..."}
+```
+
+`text` 也可以直接放整段分享文案（服务会自己挑出链接）。`note` 会存下来，供检索用。
+
+轮询 `GET /tasks/{task_id}`，`status=succeeded` 后取 `result_url`：
+
+```json
+{
+  "run_id": "wxv-20261121-213500-ab12cd",
+  "status": "done",
+  "source": {"op": "wxv_add", "text": "...", "note": "竞品新品发布"},
+  "items": [{
+    "id": "wx_xxxx", "title": "...", "author": "...",
+    "files": {
+      "video": "https://<服务地址>/runs/wxv-.../wx_xxxx/xxx.mp4?sig=...",
+      "cover": "https://<服务地址>/runs/...",
+      "sheet": "https://<服务地址>/runs/..."
+    }
+  }]
+}
+```
+
+#### 5.15.2 检索已入库
+
+```bash
+curl -X POST https://<服务地址>/api/v1/wxv/find \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"q": "新品 发布", "n": 20}'
+```
+
+#### 5.15.3 取回已入库的一条
+
+```bash
+curl -X POST https://<服务地址>/api/v1/wxv/fetch \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"id": "wx_xxxx"}'
+```
+
+同样返回任务；完成后 `result_url` 与 5.15.1 相同。
+
+#### 5.15.4 服务状态
+
+```bash
+curl https://<服务地址>/api/v1/wxv/status -H "X-API-Key: $API_KEY"
+# {"ts": "...", "online": true, ...}；online=false 说明 4090 收件箱离线
+```
+
+> `POST /resolve` 不支持视频号，会返回 `resolve_failed` 并提示改用这里。
 
 ## 6. 在你的页面里播放视频
 
@@ -918,6 +1022,7 @@ def callback():
 | `DOWNLOAD_PROXY_URL` / `DOWNLOAD_PROXY_URLS` | 否 | 下载专用出口；不配置时与搜索共用 |
 | `PLATFORM_PROXY` | 否 | 按平台指定出口，如 `gads=socks5h://127.0.0.1:1083,meta=socks5h://127.0.0.1:1083` |
 | `GADS_PROXY_URLS` | 否 | Google 广告透明度中心的出口池（逗号分隔），被限流时轮换 |
+| `INBOX_KEY` | 否 | 收件箱服务（4090）密钥，用于微信视频号下载/检索。不配置时 `/wxv` 返回 503。**不要写进仓库**，放 `.env` |
 
 修改后重启服务（`docker compose up -d` 或 `./start.sh`）。
 

@@ -273,14 +273,20 @@ def _chrome_path() -> str | None:
     return None
 
 
+def douyin_id(url: str) -> str | None:
+    """抖音作品 ID。除了 /video/<id>，全域搜索常返回 /shipin/<id>，精选页是 ?modal_id=<id>；
+    /zhuanti/、/topic/ 是专题页，不是单条作品，不认。"""
+    m = re.search(r"/(?:video|shipin)/(\d+)", url) or re.search(r"[?&]modal_id=(\d+)", url)
+    return m.group(1) if m else None
+
+
 def _douyin(url: str) -> dict:
     ck = Path(config.DOUYIN_COOKIES_FILE)
     if not ck.exists():
         raise ResolveError("抖音需要登录态：把 cookies 放到 " + str(ck))
-    m = re.search(r"/video/(\d+)", url)
-    if not m:
-        raise ResolveError("无法从链接里取出作品 ID")
-    video_id = m.group(1)
+    video_id = douyin_id(url)
+    if not video_id:
+        raise ResolveError("无法从链接里取出作品 ID（专题页、话题页不是单条作品）")
 
     try:
         from playwright.sync_api import sync_playwright
@@ -357,7 +363,7 @@ def resolve(url: str) -> dict:
     platform = platform_of(url)
     if not platform:
         if "channels.weixin.qq.com" in url or "weixin.qq.com" in url:
-            raise ResolveError("视频号没有公开网页，无法解析；第一版只用数据源给的元数据")
+            raise ResolveError("视频号没有公开网页，无法解析。请改用异步接口 POST /api/v1/wxv 让 4090 下载")
         raise ResolveError(f"不认识的链接：{url}")
     if platform == "douyin":
         return _douyin(url)

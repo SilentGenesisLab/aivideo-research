@@ -27,8 +27,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from refsearch import (config, filters as flt, pipeline, platforms, player, resolve, security, stats,
-                       tasks, webgrab)
+from refsearch import (config, filters as flt, inbox, pipeline, platforms, player, resolve, searchers, security,
+                       stats, tasks, webgrab)
 from refsearch.searchers import SOURCES
 from refsearch import video_generation, video_work
 from refsearch.video_motion import transitions
@@ -153,7 +153,7 @@ class ResolvedVideo(BaseModel):
 
 class Task(BaseModel):
     task_id: str
-    type: Literal["search", "download", "relay", "video-analysis"]
+    type: Literal["search", "download", "relay", "video-analysis", "wxv"]
     status: Literal["queued", "running", "succeeded", "failed"]
     title: str
     queue_position: int = Field(description="排队中时，前面还有几个同类任务")
@@ -292,6 +292,8 @@ def task_out(t: dict, base: str) -> dict:
         path = f"/api/v1/runs/{t['run_id']}"
         if t["kind"] == "video-analysis":
             path += f"/video-analyses/{t['meta']['analysis_id']}"
+        elif t["kind"] == "wxv":
+            path = f"/api/v1/wxv/{t['run_id']}"
         result_url = _abs(base, path)
     return {
         "task_id": t["id"], "type": t["kind"], "status": STATUS[t["status"]], "title": t["title"],
@@ -734,6 +736,118 @@ def relay(p: RelayCreate, request: Request, who: str = Depends(client)):
     return {"task_id": tid, "status": "queued", "status_url": _abs(_base(request), f"/api/v1/tasks/{tid}")}
 
 
+# ---------------- 微信视频号（经 4090 收件箱服务） ----------------
+class WxvCreate(BaseModel):
+    text: str = Field(description="视频号分享链接（https://weixin.qq.com/sph/…）或整段分享文案；一次最多 3 条")
+    note: str = Field("", description="备注；POST /wxv/find 能搜到")
+    callback_url: str | None = Field(None, description="任务完成后回调（可选）")
+
+
+class WxvFind(BaseModel):
+    q: str = Field(description="关键词；空格分隔多个词时须全部命中")
+    n: int = Field(20, ge=1, le=100, description="返回条数")
+
+
+class WxvFetch(BaseModel):
+    id: str = Field(description="已入库视频号 id，形如 wx_xxxx（见 POST /wxv/find）")
+    callback_url: str | None = Field(None, description="任务完成后回调（可选）")
+
+
+def _wxv_manifest(out: Path, run_id: str, who: str, source: dict, r: dict, items: list) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "manifest.json").write_text(json.dumps({
+        "run_id": run_id, "client": who, "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "status": r.get("status"), "source": source, "items": items,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _wxv_job(spec: dict) -> str:
+    def work(progress):
+        run_id = "wxv-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        progress.update(5, "请求 4090", run_id=run_id)
+        if spec["op"] == "add":
+            r = inbox.wxv_add(spec["text"], spec["note"], progress=progress)
+        else:
+            r = inbox.wxv_fetch(spec["item_id"], progress=progress)
+        progress.update(75, "取回文件")
+        out = config.RUNS_DIR / run_id
+        items = inbox.save_files(r, out)
+        _wxv_manifest(out, run_id, spec["who"], spec["source"], r, items)
+        return {"run_id": run_id}
+
+    return tasks.submit("wxv", spec["title"], work,
+                        {"client": spec["who"], "external_id": None},
+                        on_finish=_notifier(spec["callback_url"], spec["base"]))
+
+
+@router.post("/wxv", response_model=TaskCreated, status_code=202, tags=["视频号"],
+             summary="让 4090 下载一条微信视频号（异步，约 3–4 分钟）")
+def wxv_download(p: WxvCreate, request: Request, who: str = Depends(client)):
+    """视频号没有公开网页，本服务不自己解析，而是转发给公司 4090 的收件箱服务下载，
+    再把 mp4 / 封面 / 12 帧拼图取回本服务的结果目录。全公司每天最多 40 条。
+    完成后 result_url（结果清单）给出每个文件的限时签名链接。
+    只想找回以前下过的，用 POST /wxv/find + POST /wxv/fetch，不要重复下载。"""
+    if not inbox.available():
+        raise ApiError(503, "wxv_unavailable", "服务端未配置 INBOX_KEY")
+    text = (p.text or "").strip()
+    if not text:
+        raise ApiError(400, "invalid_request", "text 不能为空")
+    _check_callback(p.callback_url)
+    base = _base(request)
+    tid = _wxv_job({"op": "add", "text": text, "note": p.note, "who": who, "callback_url": p.callback_url,
+                    "base": base, "source": {"op": "wxv_add", "text": text, "note": p.note},
+                    "title": "视频号下载：" + text[:30]})
+    return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
+
+
+@router.post("/wxv/fetch", response_model=TaskCreated, status_code=202, tags=["视频号"],
+             summary="取回一条已入库的视频号（异步）")
+def wxv_fetch(p: WxvFetch, request: Request, who: str = Depends(client)):
+    if not inbox.available():
+        raise ApiError(503, "wxv_unavailable", "服务端未配置 INBOX_KEY")
+    _check_callback(p.callback_url)
+    base = _base(request)
+    item_id = p.id.strip()
+    tid = _wxv_job({"op": "fetch", "item_id": item_id, "who": who, "callback_url": p.callback_url,
+                    "base": base, "source": {"op": "wxv_fetch", "id": item_id},
+                    "title": "取回视频号：" + item_id[:30]})
+    return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
+
+
+@router.post("/wxv/find", tags=["视频号"], summary="搜 4090 已入库的视频号（同步，几秒）")
+def wxv_find_endpoint(p: WxvFind, who: str = Depends(client)):
+    if not inbox.available():
+        raise ApiError(503, "wxv_unavailable", "服务端未配置 INBOX_KEY")
+    try:
+        return inbox.wxv_find(p.q, p.n)
+    except inbox.InboxError as e:
+        raise ApiError(502, e.code, e.message)
+
+
+@router.get("/wxv/status", tags=["视频号"], summary="收件箱服务是否在线、凭证到期日")
+def wxv_status():
+    if not inbox.available():
+        raise ApiError(503, "wxv_unavailable", "服务端未配置 INBOX_KEY")
+    try:
+        return inbox.status()
+    except inbox.InboxError as e:
+        raise ApiError(502, e.code, e.message)
+
+
+@router.get("/wxv/{run_id}", tags=["视频号"], summary="视频号下载结果清单")
+def wxv_result(run_id: str, request: Request, who: str = Depends(client)):
+    p = config.RUNS_DIR / run_id / "manifest.json"
+    if not run_id.startswith("wxv-") or not p.is_file():
+        raise ApiError(404, "not_found", "结果不存在")
+    m = json.loads(p.read_text(encoding="utf-8"))
+    if m.get("client") != who:
+        raise ApiError(404, "not_found", "结果不存在")
+    base = _base(request)
+    return {**{k: m.get(k) for k in ("run_id", "created", "status", "source")},
+            "items": [{**it, "files": {k: _file(base, run_id, v) for k, v in (it.get("local") or {}).items()}}
+                      for it in m.get("items", [])]}
+
+
 @router.post("/resolve", response_model=ResolvedVideo, tags=["解析"],
              summary="把一条作品链接解析成元数据 + 可播放地址（同步返回，抖音约 10 秒）")
 def resolve_link(p: ResolveCreate, request: Request):
@@ -980,12 +1094,16 @@ class PageReadResponse(BaseModel):
 
 
 class PageSearchRequest(BaseModel):
-    query: str = Field(..., description="检索词")
+    query: str = Field(..., min_length=1, pattern=r"\S", description="检索词，不能为空")
     n: int = Field(10, ge=1, le=20, description="返回条数（不传 sites 时生效）")
     raw: bool | None = Field(None, description="是否返回每条网页的正文。不传：全网检索默认 true，指定 sites 时默认 false（几十个站一起搜时带全文会很慢）")
     sites: list[str] | None = Field(None, max_length=30, description=(
-        "全域搜索：要搜的站点，可填站点 key（见 GET /pages/sites）、中文名或域名，`\"all\"` 表示登记的全部站点。"
-        "每个站各做一次定向检索，结果带 site 字段。不传则是不限站点的全网检索"))
+        "要定向检索的站点，可填站点 key（见 GET /pages/sites）、中文名或域名，`\"all\"` 表示登记的全部 24 站。"
+        "每个站各做一次 site: 定向检索。"
+        "**不传时走默认组合检索**：8 个核心站定向 + 一次通用全网——"
+        "定向保证覆盖主流平台（B站/抖音/小红书/知乎/YouTube/Reddit/X/公众号），"
+        "通用那一次用来捞素材、灵感、行业通稿这类散落在任意站点的内容。"
+        "只想要其中一种时：传 sites 就只做定向；想只做通用请传 sites=[\"web\"]"))
     per_site: int = Field(5, ge=1, le=10, description="指定 sites 时每个站取几条")
 
 
@@ -994,8 +1112,11 @@ class PageSearchItem(BaseModel):
     url: str = ""
     content: str = Field("", description="摘要")
     raw_content: str | None = Field(None, description="正文，raw=true 时有值；抓到登录/风控页时为 null")
-    site: str | None = Field(None, description="来自哪个站点（指定 sites 时有值）")
+    site: str | None = Field(None, description="来自哪个登记站点（定向检索时才有值）")
     site_name: str | None = None
+    source: str | None = Field(None, description=(
+        "这条结果来自哪种检索：`site`=核心站定向（来自上面列举的平台）；"
+        "`web`=通用全网检索（不限站点，多为素材/通稿/散落内容）"))
 
 
 class PageSiteResult(BaseModel):
@@ -1005,6 +1126,13 @@ class PageSiteResult(BaseModel):
     ok: bool = Field(..., description="该站检索是否成功；false 时看 error")
     ms: int
     error: str | None = None
+    raw_count: int | None = Field(None, description=(
+        "上游（Tavily）返回的原始条数。与 count 不等说明返回的都是站外结果——上游会无视 site: 约束"))
+    provider: str | None = Field(None, description="该站结果实际由哪家检索服务提供：bocha / tavily")
+    error_class: str | None = Field(None, description=(
+        "失败分型，便于区分责任方：empty_result=上游真返回 0 条；dropped_by_filter=上游有结果但全被域名过滤丢弃（原因未判）；"
+        "never_arrived=请求没到 WebGrab；timeout=预算内没返回；upstream_fail=到了但上游失败；"
+        "config_error=配置问题；invalid=其它 4xx。正常为 null"))
 
 
 class PageSearchResponse(BaseModel):
@@ -1069,6 +1197,46 @@ def page_read(url: str = Query(..., description="目标网页地址"),
     return r
 
 
+@router.get("/youtube/trending", tags=["YouTube"],
+            summary="某国家/地区的热门视频榜（chart=mostPopular，1 配额单位）")
+def youtube_trending_endpoint(
+        region: str = Query("US", min_length=2, max_length=2,
+                            description="ISO 3166-1 两位国家码，如 US / KR / JP / GB"),
+        limit: int = Query(25, ge=1, le=50, description="返回条数"),
+        category: str = Query("", description="可选：YouTube 视频分类 id（如 10=音乐、24=娱乐）")):
+    """查“某国爆款”应优先用这个：videos.list 每次只花 1 单位，
+    而 search.list 一次要 100 单位。需要先配置 YOUTUBE_API_KEY。"""
+    try:
+        items = searchers.youtube_trending(region.upper(), limit, category)
+    except RuntimeError as e:
+        raise ApiError(503, "youtube_api_unavailable", str(e))
+    except Exception as e:  # noqa: BLE001
+        raise ApiError(502, "youtube_trending_failed", f"{type(e).__name__}: {str(e)[:200]}")
+    return {"region": region.upper(), "count": len(items),
+            "quota_cost": 1, "items": items}
+
+
+@router.get("/youtube/search", tags=["YouTube"],
+            summary="按国家检索 YouTube 视频，可按播放量排序（search.list，100 配额单位）")
+def youtube_search_endpoint(
+        q: str = Query(..., min_length=1, max_length=200, description="检索词"),
+        region: str = Query("", max_length=2,
+                            description="ISO 两位国家码；留空则不限制地区"),
+        order: Literal["", "relevance", "date", "rating", "title", "videoCount", "viewCount"] = Query(
+            "", description="排序方式：viewCount 按播放量（找爆款用这个）"),
+        limit: int = Query(10, ge=1, le=50, description="返回条数")):
+    """注意成本：每次 100 配额单位，一天 10000 单位 ≈ 100 次。
+    只是想看某国热门榜，请用 /youtube/trending（1 单位）。"""
+    if not config.YOUTUBE_API_KEY:
+        raise ApiError(503, "youtube_api_unavailable", "服务端未配置 YOUTUBE_API_KEY")
+    try:
+        items = searchers.search_youtube(q, limit, region.upper(), order)
+    except Exception as e:  # noqa: BLE001
+        raise ApiError(502, "youtube_search_failed", f"{type(e).__name__}: {str(e)[:200]}")
+    return {"query": q, "region": region.upper() or None, "order": order or "relevance",
+            "count": len(items), "quota_cost": 100, "items": items}
+
+
 @router.get("/pages/sites", response_model=list[PageSite], tags=["网页内容"],
             summary="全域搜索支持的站点（key、域名、读正文能力）")
 def page_sites():
@@ -1076,22 +1244,41 @@ def page_sites():
 
 
 @router.post("/pages/search", response_model=PageSearchResponse, tags=["网页内容"],
-             summary="全域搜索：全网或指定站点检索网页/帖子/视频页（可带全文）")
-def pages_search(p: PageSearchRequest):
+             summary="全域搜索：核心站定向 + 通用全网（默认），或指定站点定向检索")
+def pages_search(p: PageSearchRequest, request: Request, who: str = Depends(client)):
     if not webgrab.enabled():
         raise ApiError(503, "webgrab_disabled", "服务端未配置 WEBGRAB_TOKEN")
+    t0 = time.time()
     by_site = None
+    ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "")
     try:
         if p.sites:
-            items, by_site = webgrab.search_sites(p.query, p.sites, p.per_site, bool(p.raw))
+            if p.sites == ["web"]:  # 只要通用全网
+                items = webgrab.search(p.query, p.n, True if p.raw is None else p.raw)
+                for it in items:
+                    it["source"] = "web"
+            else:
+                items, by_site = webgrab.search_sites(p.query, p.sites, p.per_site, bool(p.raw))
+                for it in items:
+                    it["source"] = "site"
         else:
-            items = webgrab.search(p.query, p.n, True if p.raw is None else p.raw)
+            # 默认组合含 8 站定向，带全文会很慢；raw 不显式要求就不抓正文
+            items, by_site = webgrab.search_default(p.query, p.per_site, p.n, bool(p.raw))
     except webgrab.WebGrabError as e:
+        # 整批失败（如上游额度耗尽）时 by_site 挂在异常上，也必须落库——
+        # 否则最该留痕的事故在埋点里反而看不见
+        if getattr(e, "by_site", None):
+            stats.log_page_search(who, ip, p.query, e.by_site, len(p.sites or []),
+                                  int((time.time() - t0) * 1000))
         raise ApiError(400 if e.code == "invalid_sites" else 502, e.code, e.message)
+    if by_site:
+        stats.log_page_search(who, ip, p.query, by_site, len(p.sites or []),
+                              int((time.time() - t0) * 1000))
     return {"query": p.query, "count": len(items), "by_site": by_site,
             "results": [{"title": it.get("title") or "", "url": it.get("url") or "",
                          "content": it.get("content") or "", "raw_content": it.get("raw_content"),
-                         "site": it.get("site"), "site_name": it.get("site_name")} for it in items]}
+                         "site": it.get("site"), "site_name": it.get("site_name"),
+                         "source": it.get("source")} for it in items]}
 
 
 # ---------------- 子应用：独立的 OpenAPI 文档 ----------------
