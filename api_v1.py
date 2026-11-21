@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from refsearch import (config, edge, filters as flt, inbox, pipeline, platforms, player, resolve, searchers,
                        security, stats, tasks, webgrab)
+from refsearch import discover, downloader
 from refsearch.searchers import SOURCES
 from refsearch import video_generation, video_work
 from refsearch.video_motion import transitions
@@ -149,6 +150,13 @@ class ResolvedVideo(BaseModel):
     like: str | None = Field(None, description="仅小红书")
     collect: str | None = Field(None, description="仅小红书")
     comment: str | None = Field(None, description="仅小红书")
+    view_count: int | None = Field(None, description="播放量（YouTube / TikTok）")
+    like_count: int | None = Field(None, description="点赞数（TikTok；YouTube 需看 /discover）")
+    comment_count: int | None = None
+    repost_count: int | None = None
+    channel: str | None = None
+    timestamp: int | None = Field(None, description="发布时间（Unix 秒）")
+    upload_date: str | None = None
     embed_url: str | None = Field(None, description="可放进 iframe 的官方播放器地址；没有时为 null")
     stream_url: str = Field(description="服务器代理播放地址，支持 Range，可直接放进 <video src>")
     direct: dict | None = Field(None, description="仅 direct=true 且平台支持时返回：video_url / audio_url（DASH 才有）/ headers / muxed")
@@ -156,7 +164,7 @@ class ResolvedVideo(BaseModel):
 
 class Task(BaseModel):
     task_id: str
-    type: Literal["search", "download", "relay", "video-analysis", "wxv"]
+    type: Literal["search", "download", "relay", "video-analysis", "wxv", "discover"]
     status: Literal["queued", "running", "succeeded", "failed"]
     title: str
     queue_position: int = Field(description="排队中时，前面还有几个同类任务")
@@ -294,7 +302,9 @@ def task_out(t: dict, base: str) -> dict:
     result_url = None
     if t["run_id"] and t["status"] == "done":
         path = f"/api/v1/runs/{t['run_id']}"
-        if t["kind"] == "video-analysis":
+        if t["kind"] == "discover" or t["meta"].get("discover_id"):
+            path = f"/api/v1/discover/{t['meta'].get('discover_id') or t['run_id']}"
+        elif t["kind"] == "video-analysis":
             path += f"/video-analyses/{t['meta']['analysis_id']}"
         elif t["kind"] == "wxv":
             path = f"/api/v1/wxv/{t['run_id']}"
@@ -903,7 +913,9 @@ def resolve_link(p: ResolveCreate, request: Request):
     return {
         "direct": _direct_info(info) if p.direct else None,
         **{k: info.get(k) for k in ("platform", "platform_name", "video_id", "title", "author", "duration",
-                                    "cover", "page_url", "max_height", "desc", "like", "collect", "comment")},
+                                    "cover", "page_url", "max_height", "desc", "like", "collect", "comment",
+                                    "view_count", "like_count", "comment_count", "repost_count",
+                                    "channel", "timestamp", "upload_date")},
         "embed_url": player.embed_url(info["page_url"]),
         "stream_url": _abs(base, "/api/v1/resolve/stream?url=" + quote(info["page_url"], safe="")
                            + "&" + security.sign_value(info["page_url"], TTL_STREAM)),
@@ -1331,6 +1343,180 @@ def pages_search(p: PageSearchRequest, request: Request, who: str = Depends(clie
 
 
 # ---------------- 子应用：独立的 OpenAPI 文档 ----------------
+
+# ---------------- 视频发现（/discover） ----------------
+
+class DiscoverCreate(BaseModel):
+    accounts: list[str] = Field(default_factory=list, max_length=discover.MAX_ACCOUNTS,
+                                description="账号：@handle 或频道 URL，TikTok / YouTube 通用")
+    keywords: list[str] = Field(default_factory=list, max_length=discover.MAX_KEYWORDS,
+                                description="关键词检索：TikTok 走网页搜索（受出口 IP 限流，详见文档）；YouTube 走官方搜索")
+    platforms: list[Literal["tiktok", "youtube"]] = Field(default_factory=lambda: ["tiktok", "youtube"],
+                                                          description="要检索的平台")
+    per_source: int = Field(30, ge=1, le=discover.MAX_PER_SOURCE, description="每个账号/话题/关键词最多取几条")
+    limit: int = Field(50, ge=1, le=discover.MAX_LIMIT, description="排序后最终返回条数")
+    sort: Literal["views", "likes", "comments", "recent"] = Field("views", description="排序字段")
+    min_views: int | None = Field(None, ge=0, description="只要播放量不低于此值的")
+    region: str | None = Field(None, description=(
+        "出口地区，逗号分隔。可选 sea(泰国) / eu(英国) / jp / kr / br / mx / au / ng(尼日利亚)，"
+        "分组别名 eu_us、jp_kr、latam、africa、oceania、all。不传用平台默认出口"))
+    download_top: int | None = Field(None, ge=1, le=100, description="填了就顺手下前 N 条（会多花时间）")
+    max_height: int = Field(720, ge=240, le=2160, description="下载清晰度上限")
+    callback_url: str | None = None
+
+
+class DiscoverItem(BaseModel):
+    platform: str = Field(description="TikTok / YouTube")
+    id: str
+    url: str
+    title: str = ""
+    author: str = ""
+    duration: float | None = None
+    timestamp: int | None = Field(None, description="发布时间（Unix 秒）")
+    cover: str = ""
+    view_count: int = 0
+    like_count: int = 0
+    comment_count: int = 0
+    repost_count: int = 0
+    region: str = Field("", description="这条从哪个地区出口检索到；为空表示平台默认出口")
+    regions: list[str] = Field(default_factory=list, description="所有检索到它的地区")
+    source: str = Field("", description="account / search")
+    found_by: str = Field("", description="这条来自哪个账号/话题/关键词")
+    downloaded: bool = False
+    file_url: str | None = Field(None, description="已下载时的限时签名链接")
+    download_error: str | None = None
+
+
+class DiscoverResult(BaseModel):
+    discover_id: str
+    created: str
+    count: int
+    spec: dict
+    items: list[DiscoverItem]
+    errors: list[dict] = Field(default_factory=list, description="检索失败的来源")
+    downloads: list[dict] = Field(default_factory=list)
+
+
+class DiscoverDownloadCreate(BaseModel):
+    top: int | None = Field(None, ge=1, le=100, description="下载排序后的前 N 条")
+    urls: list[str] | None = Field(None, max_length=100, description="按 URL 下载指定条目")
+    max_height: int = Field(720, ge=240, le=2160)
+
+
+def _own_discover(discover_id: str, who: str) -> dict:
+    try:
+        rec = discover.load(discover_id)
+    except (FileNotFoundError, ValueError):
+        raise ApiError(404, "not_found", "发现结果不存在")
+    if rec.get("client") != who:
+        raise ApiError(404, "not_found", "发现结果不存在")
+    return rec
+
+
+def _discover_job(spec: dict) -> str:
+    def work(progress):
+        rec = discover.discover(spec, progress)
+        if spec.get("download_top"):
+            progress(f"下载前 {spec['download_top']} 条…")
+            rec["downloads"] = downloader.download(rec["items"][:spec["download_top"]],
+                                                   discover.videos_dir(rec["discover_id"]),
+                                                   spec.get("max_height") or 720, progress)
+            discover.save(rec)
+        return {"run_id": rec["discover_id"]}
+
+    return tasks.submit("discover", f"发现 {len(spec['accounts'])} 个账号 / {len(spec['keywords'])} 个关键词",
+                        work, {"client": spec["who"], "discover_id": spec["discover_id"]},
+                        on_finish=_notifier(spec["callback_url"], spec["base"]),
+                        retry={**spec, "handler": "api_discover"})
+
+
+def _discover_download_job(spec: dict) -> str:
+    def work(progress):
+        rec = discover.load(spec["discover_id"])
+        res = downloader.download(spec["videos"], discover.videos_dir(rec["discover_id"]),
+                                  spec["max_height"], progress)
+        have = {d["url"]: d for d in rec.get("downloads") or []}
+        have.update({d["url"]: d for d in res})
+        rec["downloads"] = list(have.values())
+        discover.save(rec)
+        return {"run_id": rec["discover_id"]}
+
+    return tasks.submit("download", f"下载 {len(spec['videos'])} 条视频", work,
+                        {"client": spec["who"], "discover_id": spec["discover_id"]},
+                        on_finish=_notifier(spec["callback_url"], spec["base"]),
+                        retry={**spec, "handler": "api_discover_download"})
+
+
+tasks.register_retry("api_discover", _discover_job)
+tasks.register_retry("api_discover_download", _discover_download_job)
+
+
+@router.post("/discover", response_model=TaskCreated, status_code=202, tags=["发现"],
+             summary="按账号/话题/关键词发现视频并按播放或点赞排序（异步）")
+def create_discover(p: DiscoverCreate, request: Request, who: str = Depends(client)):
+    """关键词两类平台都支持：TikTok 走无头浏览器打开搜索页、拦截页面自己的搜索接口
+    （yt-dlp 的话题标签提取器已损坏）；该接口按出口 IP 限流，连查几次会返回空，
+    此时换一个 region 或稍后重试。YouTube 走 ytsearch。
+    结果按 sort 降序，默认播放量。传 download_top 就在任务里顺手下前 N 条。
+    互动数来自平台列表页：TikTok 有播放/点赞/评论/分享，YouTube 频道列表只有播放量。"""
+    if not p.accounts and not p.keywords:
+        raise ApiError(400, "invalid_request", "accounts 与 keywords 至少传一个")
+    _check_callback(p.callback_url)
+    base = _base(request)
+    spec = {"accounts": p.accounts, "keywords": p.keywords, "platforms": p.platforms,
+            "per_source": p.per_source, "limit": p.limit, "sort": p.sort, "min_views": p.min_views,
+            "region": p.region,
+            "download_top": p.download_top, "max_height": p.max_height,
+            "who": who, "callback_url": p.callback_url, "base": base, "discover_id": discover.new_id()}
+    tid = _discover_job(spec)
+    return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
+
+
+@router.get("/discover/regions", tags=["发现"], summary="可用的出口地区")
+def discover_regions():
+    """region 参数可填的出口 id。只读配置，不发任何请求。"""
+    return {"regions": discover.region_list(),
+            "aliases": {k: v for k, v in discover.REGION_ALIASES.items() if k.isascii()}}
+
+
+@router.get("/discover/{discover_id}", response_model=DiscoverResult, tags=["发现"],
+            summary="发现结果（按互动量排序）")
+def get_discover(discover_id: str, request: Request, who: str = Depends(client)):
+    rec = _own_discover(discover_id, who)
+    dl = {d["url"]: d for d in rec.get("downloads") or []}
+    base = _base(request)
+    items = []
+    for i in rec["items"]:
+        d = dl.get(i["url"]) or {}
+        rel = (f"_discover/{rec['discover_id']}/videos/{Path(d['file']).name}"
+               if d.get("ok") and d.get("file") else None)
+        items.append({**i, "downloaded": bool(d.get("ok")),
+                      "file_url": _abs(base, security.signed_path(rel)) if rel else None,
+                      "download_error": d.get("error")})
+    return {**{k: rec.get(k) for k in ("discover_id", "created", "count", "spec", "errors")},
+            "items": items,
+            "downloads": [{k: v for k, v in d.items() if k != "file"} for d in rec.get("downloads") or []]}
+
+
+@router.post("/discover/{discover_id}/downloads", response_model=TaskCreated, status_code=202, tags=["发现"],
+             summary="下载发现结果里的视频（mp4，H.264/AAC）")
+def download_discover(discover_id: str, p: DiscoverDownloadCreate, request: Request, who: str = Depends(client)):
+    rec = _own_discover(discover_id, who)
+    if p.urls:
+        idx = {i["url"]: i for i in rec["items"]}
+        vids = [idx[u] for u in p.urls if u in idx]
+    elif p.top:
+        vids = rec["items"][:p.top]
+    else:
+        raise ApiError(400, "invalid_request", "urls 与 top 至少传一个")
+    if not vids:
+        raise ApiError(400, "invalid_request", "没有匹配到结果中的视频")
+    base = _base(request)
+    tid = _discover_download_job({"discover_id": discover_id, "videos": vids, "max_height": p.max_height,
+                                  "who": who, "base": base, "callback_url": None})
+    return {"task_id": tid, "status": "queued", "status_url": _abs(base, f"/api/v1/tasks/{tid}")}
+
+
 api = FastAPI(
     title="参考视频检索 API", version="1.0.0",
     description=("上传产品图 → AI 拆解关键词 → 16 个渠道检索参考广告片 → AI 打分并写出参考点 → 可选下载。\n\n"

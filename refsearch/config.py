@@ -180,3 +180,18 @@ def ffmpeg_path() -> str | None:
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         return None
+
+# ---------------- 区域出口（/discover 的 region 参数用） ----------------
+# 格式：sea=http://127.0.0.1:8900,eu=http://127.0.0.1:8901,...
+# 每条都是 tools/chain_proxy.py 起的本地链式代理（本机 → 韩国 SOCKS → 住宅代理）
+REGION_PROXY = {}
+for _item in (os.environ.get("REGION_PROXY") or "").split(","):
+    _k, _, _v = _item.strip().partition("=")
+    if _k.strip() and _v.strip():
+        REGION_PROXY[_k.strip()] = _v.strip()
+
+
+def region_proxy(region: str, platform: str = "tiktok", download: bool = False) -> str:
+    """按区域选出口；该区域没配就回退到平台默认出口。"""
+    return REGION_PROXY.get(region or "") or proxy_for(platform, download)
+

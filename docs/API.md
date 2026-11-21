@@ -598,6 +598,11 @@ curl -X POST https://videodata.sligenai.cn/api/v1/resolve \
 
 ---
 
+
+> 自 2026-11-22 起，`/resolve` 还会返回 `view_count`、`like_count`、`comment_count`、
+> `repost_count`、`channel`、`timestamp`、`upload_date`。平台不提供的字段为 `null`。
+> 想批量拿这些数字并按它们排序，用 §5.16 的 `/discover`。
+
 ### 5.13 GET /resolve/stream（代理播放）
 
 `stream_url` 指向的就是这个地址，**不需要 API Key**，凭 URL 里的 `exp` / `sig` 签名访问，方便直接给浏览器 `<video>`：
@@ -1020,6 +1025,126 @@ def callback():
 - 服务端单机容量（4 核 / 7.2GB，单进程）：轻量接口约 **140 req/s**，缓存命中的 `/resolve` 约 **120 req/s**，压到 256 并发无错误；超过后时延线性上升，不会报错。
 - 检索任务跑满（2 个）时，`/resolve` p95 **25 ms**、播放 p95 **57 ms**，互不阻塞。
 - `POST /resolve` 是同步接口，抖音最慢约 10 秒；前端请设置 ≥ 60 秒超时。
+
+---
+
+### 5.16 视频发现（`/discover`）
+
+按账号 / 关键词列出视频，并按播放量或点赞数排序。适用于「先找爆款、再下载」：
+`/pages/search` 拿不到 TikTok 视频，`/resolve` 只能一条一条给链接。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/discover` | 创建发现任务，立即返回 `task_id` |
+| GET | `/api/v1/discover/{discover_id}` | 排序后的结果 |
+| POST | `/api/v1/discover/{discover_id}/downloads` | 下载其中若干条 |
+
+**平台支持范围**（这是 yt-dlp 的能力边界，不是本服务加的限制）：
+
+| 来源 | TikTok | YouTube |
+|---|---|---|
+| 账号 | 支持：`@handle` 或主页 URL | 支持：`@handle`、`/channel/UC…`、频道 URL |
+| 关键词 | 支持（无头浏览器，受 IP 限流） | 支持 |
+
+**TikTok 关键词怎么实现的**：yt-dlp 没有 TikTok 搜索提取器，话题标签提取器（`TikTokTagIE`）
+已被上游标记为 `_WORKING = False`。所以改用无头 Chromium 打开 `tiktok.com/search?q=<词>`，
+让页面自己的 JS 生成 `X-Bogus` 签名去请求 `/api/search/general/full/`，本服务只拦截响应，
+再滚动翻页。一次通常能拿 12–120 条，带完整的播放 / 点赞 / 评论 / 分享数。
+
+**限制**：搜索接口按**出口 IP** 限流。同一个 IP 连续查几次后会返回空响应（HTTP 200、body 为空），
+此时结果是 0 条并在 `errors` 里写明原因。对策是换一个 `region`，或隔几分钟再试。
+结果会缓存 30 分钟，同一关键词重复调用不会重新触发限流。
+
+**不同地区结果差别很大**（与账号列表相反）：实测 `tecno` 在东南亚出口拿到 TECNO 泰国官方号
+2290 万播放的广告片，在日本出口拿到的是大量 techno 电音内容（词形歧义）。要找某个地区的营销素材，
+就指定那个地区的 `region`。
+
+**请求体**
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `accounts` | `[]` | 账号列表，最多 30 个 |
+| `keywords` | `[]` | 关键词列表，最多 10 个，只对 YouTube 生效 |
+| `platforms` | `["tiktok","youtube"]` | 要检索的平台 |
+| `per_source` | 30 | 每个账号 / 关键词最多取几条，上限 50 |
+| `limit` | 50 | 排序后最终返回条数，上限 200 |
+| `sort` | `views` | `views` / `likes` / `comments` / `recent` |
+| `min_views` | 无 | 只要播放量不低于此值的 |
+| `download_top` | 无 | 填了就顺手下前 N 条（任务会多花下载时间） |
+| `max_height` | 720 | 下载清晰度上限 |
+| `callback_url` | 无 | 任务结束回调，格式与其它任务一致 |
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/discover \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"accounts":["@itelnigeria","@tecnoghana"],"keywords":["TECNO phone advert"],
+       "per_source":30,"limit":40,"sort":"views"}'
+```
+
+**出口地区（`region`）**
+
+同一批账号/关键词可以分别从不同地区的住宅出口去取。`GET /api/v1/discover/regions` 返回当前配了哪些出口。
+
+| id | 地区 | 状态 |
+|---|---|---|
+| `sea` | 泰国 曼谷 | 可用 |
+| `eu` | 英国 伦敦 | 可用（**没有美国出口**） |
+| `jp` | 日本 东京 | 可用 |
+| `kr` | 韩国 首尔 | 可用 |
+| `br` | 巴西 圣保罗 | 可用 |
+| `mx` | 墨西哥 墨西哥城 | 可用 |
+| `au` | 澳大利亚 悉尼 | 可用 |
+| `ng` | 尼日利亚 埃基蒂 | 可用（TikTok 默认出口） |
+
+分组别名：`sea`、`eu_us`、`jp_kr`、`latam`（br+mx）、`africa`、`oceania`、`all`。
+也可以逗号分隔直接写多个 id，或写中文（`日韩`、`东南亚`、`南美`、`欧美`、`澳洲`、`非洲`）。
+不传 `region` 就用平台默认出口。`tiktok` 的默认出口仍是尼日利亚。
+
+> **实测结论（2026-11-22）**：7 个地区对同一批 TikTok 账号返回的结果**完全相同**
+> （20/20 条、Jaccard = 1.00，零失败），播放数也一致；YouTube 关键词搜索每次结果都在变，
+> 但同地区连跑的波动（J = 0.58~0.88）和跨地区（J = 0.50~0.67）没有差别，
+> 说明那是 yt-dlp 搜索本身的抖动，不是地区差异。
+> 换句话说：**多地区检索目前不会带来更多内容**，它的价值在于出口冗余
+> （某条住宅代理挂了可以换一条），以及个别内容在特定地区被限制时的备选出口。
+> 想要更多候选，有效的手段是换关键词或多跑几次，不是换地区。
+
+**结果**
+
+```json
+{
+  "discover_id": "20261122-005647-e6e891",
+  "created": "2026-11-22 00:56:47",
+  "count": 10,
+  "items": [
+    {"platform": "TikTok", "id": "7709518424203857173",
+     "url": "https://www.tiktok.com/@itelnigeria/video/7709518424203857173",
+     "title": "itel wants to take you home this season!",
+     "author": "itelnigeria", "duration": 25.7,
+     "view_count": 764200, "like_count": 1038, "comment_count": 20, "repost_count": 0,
+     "source": "account", "found_by": "tiktok:@itelnigeria",
+     "downloaded": true,
+     "file_url": "https://videodata.sligenai.cn/files/_discover/...mp4?exp=...&sig=..."}
+  ],
+  "errors": [],
+  "downloads": []
+}
+```
+
+互动数说明：TikTok 主页列表直接给播放 / 点赞 / 评论；**YouTube 频道列表和搜索结果只有播放量**，
+`like_count` 为 0。要单条点赞数，对该视频调 `POST /resolve`。
+
+**下载**
+
+```bash
+curl -X POST https://videodata.sligenai.cn/api/v1/discover/{discover_id}/downloads \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" -d '{"top":10}'
+```
+
+异步任务；完成后 `GET /discover/{id}` 里对应条目 `downloaded=true`，`file_url` 是 7 天有效的签名链接。
+文件落在 `runs/_discover/<discover_id>/videos/`，**不会自动清理**，请自行控制下载量。
+
+**出口与地域**：TikTok 的发现和下载都走 `PLATFORM_PROXY` 里 `tiktok` 配的出口（当前是一台尼日利亚住宅代理）。
+要看别的地区的内容，要换出口，不是换参数。
 
 ---
 

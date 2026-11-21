@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from . import config
-from .searchers import canonical
+from .searchers import UA, canonical
 
 TIMEOUT = 180  # 单条视频最长下载时间（秒）
 _TRANSIENT = ("No video formats found", "KeyError", "HTTP Error 412", "HTTP Error 429")
@@ -123,8 +123,17 @@ def download(videos: list[dict], out_dir: Path, max_height: int = 720,
         if config.ffmpeg_path():
             cmd += ["--ffmpeg-location", config.ffmpeg_path()]
         # 平台名 → 出口配置里的平台键：Google 透明度返回的是 YouTube 链接，所以走 youtube 出口
-        if (key := _PLATFORM_PROXY_KEY.get(v.get("platform"))) and (proxy := config.proxy_for(key, download=True)):
-            cmd += ["--proxy", proxy]
+        # 条目带了 region 就用该地区出口（/discover 多地检索的结果），否则按平台默认出口
+        _key = _PLATFORM_PROXY_KEY.get(v.get("platform"))
+        if v.get("region"):
+            _proxy = config.region_proxy(v["region"], _key or "tiktok", download=True)
+        else:
+            _proxy = config.proxy_for(_key, download=True) if _key else ""
+        if _proxy:
+            cmd += ["--proxy", _proxy]
+        if v.get("platform") == "TikTok":
+            # TikTok 页面和 CDN 对非浏览器 UA 返回 403 / 异常响应
+            cmd += ["--user-agent", UA]
         if v.get("platform") == "Bilibili":
             cmd += ["--add-header", "Referer:https://www.bilibili.com/"]
         if v.get("platform") == "抖音":

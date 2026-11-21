@@ -209,6 +209,13 @@ def _info(url: str, platform: str) -> dict:
         "headers": best.get("http_headers") or {},
         "page_url": data.get("webpage_url") or url,
         "max_height": best.get("height"),
+        "view_count": data.get("view_count"),
+        "like_count": data.get("like_count"),
+        "comment_count": data.get("comment_count"),
+        "repost_count": data.get("repost_count"),
+        "channel": data.get("uploader") or data.get("channel") or "",
+        "timestamp": data.get("timestamp"),
+        "upload_date": data.get("upload_date"),
         # 没有音视频齐全的渐进式格式时（YouTube 1080p 只有 DASH），直链没法直接播，
         # 播放要走 yt-dlp 合并成本地 mp4
         "muxed": bool(playable),

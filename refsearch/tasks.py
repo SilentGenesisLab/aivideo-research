@@ -23,6 +23,9 @@ _POOLS = {
     "relay": ThreadPoolExecutor(3, thread_name_prefix="relay"),
     # 视频号下载一条 3–4 分钟，全公司每天上限 40 条；并发 2 足够，再多只是堆在 4090 队列里
     "wxv": ThreadPoolExecutor(2, thread_name_prefix="wxv"),
+    # 发现：每个任务并发起若干 yt-dlp 子进程，任务级并发 2 足够
+    "discover": ThreadPoolExecutor(int(os.environ.get("DISCOVER_WORKERS", "2")),
+                                   thread_name_prefix="discover"),
 }
 _tasks: dict[str, dict] = {}
 _lock = threading.Lock()
